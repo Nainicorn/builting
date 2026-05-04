@@ -1,0 +1,113 @@
+BEGGARS TOMB — ROOM LAYOUT AND SPATIAL COORDINATES
+=====================================================
+Source: Revit BT_07.ifc + tunnel_2d.dxf (DXF INSUNITS=4, millimeters → meters auto-converted)
+DXF coordinate origin = Revit project base point.
+All coordinates below are in METERS after mm→m conversion.
+
+COORDINATE SYSTEM
+------------------
+DXF bounding box (mm → m):
+  X: 87.8 m  to  195.3 m   (span ≈ 107.5 m east-west)
+  Y: 27.8 m  to  204.1 m   (span ≈ 176.3 m north-south)
+  Z: Level 0 = 0.0 m local  (= 1290 m MSL absolute)
+     Level 1 = 4.0 m local  (= 1294 m MSL absolute)
+
+DXF layer → semantic mapping (auto-detected by parser):
+  A-WALL        → WALL        (126 entities)
+  M-HVAC-DUCT   → DUCT        (53 entities)
+  M-EQPM        → EQUIPMENT   (38 entities)
+  A-DOOR        → DOOR        (41 entities)
+  A-FLOR        → SLAB        (15 entities)
+  E-ELEC-EQPM   → EQUIPMENT   (521 entities — electrical)
+
+DUCT RUN EXTENTS (from DXF M-HVAC-DUCT layer)
+-----------------------------------------------
+Duct centerlines span:
+  X: 120.2 m  to  187.8 m   (67.6 m east-west duct run)
+  Y: 163.7 m  to  175.0 m   (11.3 m north-south duct run)
+Duct runs are at Level 0 primarily, ceiling-mounted.
+Duct centerline elevation: ~3.75 m above floor (storey height 4.0 m, duct radius 0.25 m)
+
+EQUIPMENT POSITIONS (from DXF M-EQPM layer, in meters)
+--------------------------------------------------------
+Equipment Item A:  (120.745,  172.571,  0.0)  — 9500 CFM Centrifugal Fan
+Equipment Item B:  (182.649,  163.276,  0.0)  — 19000 CFM Centrifugal Fan
+(Generator and AHU positions are at similar X/Y — see E-ELEC-EQPM layer)
+
+ROOM DEFINITIONS (from Zion_Text_Description.docx + IFC spatial structure)
+---------------------------------------------------------------------------
+
+Room 1 — AC Room (Air Conditioning Room):
+  Location:    East side of facility, midway along east portal approach
+  Width:        5.0 m  (east-west)
+  Length:       9.0 m  (north-south)
+  Height:       4.0 m  (Level 0, floor at 1290 m MSL)
+  Contents:     9500 CFM Centrifugal Inline Belt Drive Fan
+                AHU Fan Module (Rear Discharge Up, 50 sq ft coil)
+  Door:         1× interior single 810 × 2110 mm (good seal)
+  Approximate centroid: (123 m, 172 m) in DXF space
+
+Room 2 — Diesel Generator Room:
+  Location:    Extends NORTH off the center tunnel junction
+  Width:       30.0 m  (east-west)
+  Length:      15.0 m  (north-south)
+  Height:       4.0 m  (Level 0, floor at 1290 m MSL)
+  Contents:    2× Caterpillar 3512C 1500 kW Tier 2 generators (placed in center)
+               19000 CFM Centrifugal Inline Belt Drive Fan (exhaust)
+  Sub-rooms:   2 smaller interior rooms
+               - Northwest corner: approx 5 m × 5 m
+               - Northeast corner: approx 5 m × 5 m
+  Doors:       2× double flush 1700 × 2000 mm (leaky — no airlock)
+  NOTE:        Room generates 315 kW sensible heat load
+  Approximate centroid: (155 m, 168 m) in DXF space
+
+Room 3 — Exhaust / Office Chamber:
+  Location:    West side of facility, midway along west portal approach
+  Width:        5.0 m  (east-west)
+  Length:       8.0 m  (north-south)
+  Height:       4.0 m  (Level 0, floor at 1290 m MSL)
+  Contents:    Exhaust equipment + office space
+  Door:         NONE (open drift connection)
+  Approximate centroid: (125 m, 165 m) in DXF space
+
+PORTAL BUILDING STRUCTURES (Level 0 + Level 1)
+------------------------------------------------
+West Portal Building:
+  Elevation:    Level 0 = 1290 m MSL
+  Dimensions:   4.0 m wide (matching tunnel bore) × ~2.0 m deep × 4.0 m tall
+  Door:         1× interior single 810 × 2110 mm
+
+East Portal Building:
+  Elevation:    Level 1 = 1294 m MSL
+  Dimensions:   4.0 m wide (matching tunnel bore) × ~2.0 m deep × 4.0 m tall
+  Door:         1× interior single 810 × 2110 mm
+
+WALL GEOMETRY SUMMARY
+----------------------
+All walls: Basic Wall — Concrete 200mm (thickness = 0.200 m)
+Primary wall height at Level 0:  4.0 m
+Primary wall height at Level 1:  4.0 m
+Some portal walls:               5.0 m
+Total wall count in model:       62 (from BT_07.ifc reference)
+
+Wall lengths present (metres):
+  30.20, 30.00  — main longitudinal walls parallel to tunnel axis
+   8.30,  8.10  — cross-bay structural walls
+   7.43 (×2)    — equipment room side walls
+   5.49 (×2)    — standard bay panels
+   5.29 (×2)    — standard bay panels (Level 1)
+   4.80          — equipment alcove walls
+   2.39, 2.29   — short walls (door surrounds)
+   2.09 (×3)    — door-flanking short walls
+
+STOREY CONTAINMENT
+-------------------
+Level 0 (elevation = 0.0 m local / 1290 m MSL):
+  Contains: generator room, AC room, west portal building,
+            main structural walls, primary duct runs,
+            9500 CFM fan, generator, AHU
+
+Level 1 (elevation = 4.0 m local / 1294 m MSL):
+  Contains: east portal building, Level 1 walls,
+            Level 1 duct runs, 19000 CFM fan connections,
+            upper duct fittings (elbows, transitions)

@@ -1,0 +1,55 @@
+{
+  "_fixture": "tunnel",
+  "_description": "Beggars Tomb tunnel render — VSM direct provenance, 100% inline stamping coverage",
+  "_input_s3_prefix": "uploads/user-1/2de977d8-b155-45e5-8c81-ef210a548f0c",
+  "_last_verified": "2026-05-03",
+  "assertions": [
+    {
+      "name": "coverage_gte_95pct",
+      "description": "≥95% of IfcProducts must have Pset_BuiltingProvenance",
+      "metric": "coverage_pct",
+      "op": "gte",
+      "value": 95
+    },
+    {
+      "name": "direct_vsm_gte_100",
+      "description": "≥100 elements must have status=direct and SourceFile containing .vsm",
+      "metric": "source_file_contains",
+      "status": "direct",
+      "pattern": ".vsm",
+      "op": "gte",
+      "value": 100
+    },
+    {
+      "name": "flow_fittings_missing_by_design",
+      "description": "IfcFlowFitting elements come from connectivity synthesis — no file origin, so missing is correct",
+      "metric": "type_status_count",
+      "ifc_type": "IfcFlowFitting",
+      "status": "missing",
+      "op": "gte",
+      "value": 20
+    },
+    {
+      "name": "at_least_one_derived_geometric",
+      "description": "Topology-generated portal end-walls must be derived_geometric, not fabricated direct",
+      "metric": "status_count",
+      "status": "derived_geometric",
+      "op": "gte",
+      "value": 1
+    },
+    {
+      "name": "at_least_one_derived_inferred",
+      "description": "Topology-reconstructed walls must be derived_inferred",
+      "metric": "status_count",
+      "status": "derived_inferred",
+      "op": "gte",
+      "value": 1
+    },
+    {
+      "name": "no_fabricated_sources",
+      "description": "No element may claim a source file that wasn't in the input set",
+      "metric": "no_fabricated_sources",
+      "allowed_source_patterns": [".vsm", ".dxf", ".txt", ".docx", ".csv", ".jpg", ".pdf"]
+    }
+  ]
+}

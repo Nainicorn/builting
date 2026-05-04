@@ -1,0 +1,6 @@
+- human in the loop retry logic with light fixture addition
+- details pane button for "extra files" that shows a popup where developer/engineer 
+can download files from S3 that are useful for debugging/understanding
+- make the details pane follow KISS principle (don't overcomplicate, make it easy for engineers to use)
+- understand the application every single excruciating detail
+- why dxf over dwg, why specific input files

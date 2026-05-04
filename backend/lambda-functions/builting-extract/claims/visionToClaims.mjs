@@ -6,9 +6,9 @@
  */
 
 import {
-  buildClaim, buildEvidence, typeToKind, inferDiscipline,
+  buildClaim, buildEvidence, buildProvenance, typeToKind, inferDiscipline,
   CLAIM_KINDS, EXTRACTION_METHODS, COORDINATE_SOURCES, SOURCE_ROLES,
-  COORDINATE_DERIVATION
+  COORDINATE_DERIVATION, PROVENANCE_STATUS
 } from './claimsSchema.mjs';
 
 /**
@@ -116,6 +116,7 @@ export function visionToClaims(visionFiles) {
             material: Math.min(documentConf * 0.6, 0.60),
           },
           discipline: inferDiscipline(el.type, el.properties),
+          provenance: buildProvenance(sourceFileName, PROVENANCE_STATUS.DIRECT, 'extract'),
         }
       ));
     }
@@ -148,6 +149,7 @@ export function visionToClaims(visionFiles) {
           confidence: finding.confidence ?? 0.30,
           fieldConfidence: {},
           discipline: 'unknown',
+          provenance: buildProvenance(sourceFileName, PROVENANCE_STATUS.DIRECT, 'extract'),
         }
       ));
     }

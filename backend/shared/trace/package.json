@@ -1,0 +1,10 @@
+{
+  "name": "@builting/trace",
+  "version": "0.1.0",
+  "description": "Pipeline trace writer — per-stage attempt files in S3.",
+  "type": "module",
+  "main": "index.mjs",
+  "exports": {
+    ".": "./index.mjs"
+  }
+}

@@ -14,25 +14,6 @@
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
                 </svg>
             </button>
-            <button class="__renderbox-download-chevron hidden" title="More export formats">
-                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
-                </svg>
-            </button>
-            <div class="__renderbox-download-dropdown hidden">
-                <button class="__renderbox-download-option" data-format="ifc">
-                    <span class="__renderbox-download-format">IFC</span>
-                    <span class="__renderbox-download-label">BIM Model</span>
-                </button>
-                <button class="__renderbox-download-option" data-format="glb">
-                    <span class="__renderbox-download-format">glTF</span>
-                    <span class="__renderbox-download-label">Web / Unreal / Unity</span>
-                </button>
-                <button class="__renderbox-download-option" data-format="obj">
-                    <span class="__renderbox-download-format">OBJ</span>
-                    <span class="__renderbox-download-label">Universal 3D</span>
-                </button>
-            </div>
         </div>
         <div class="__renderbox-element-panel hidden">
             <div class="__renderbox-panel-header">
@@ -44,34 +25,19 @@
                 <div class="__renderbox-panel-geometry __renderbox-panel-section"></div>
                 <div class="__renderbox-panel-relationships __renderbox-panel-section"></div>
                 <div class="__renderbox-panel-provenance __renderbox-panel-section"></div>
-                <div class="__renderbox-panel-psets __renderbox-panel-section"></div>
-            </div>
-        </div>
-        <!-- Telemetry Overlay Controls -->
-        <div class="__renderbox-telemetry hidden">
-            <button class="__renderbox-telemetry-toggle" title="Toggle sensor overlay">
-                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width:16px;height:16px">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
-                </svg>
-                <span class="__renderbox-telemetry-label">Sensors</span>
-            </button>
-            <select class="__renderbox-telemetry-type hidden" title="Sensor type filter">
-                <option value="all">All Sensors</option>
-                <option value="TEMPERATURE">Temperature</option>
-                <option value="AIRFLOW">Airflow</option>
-                <option value="EQUIPMENT_STATUS">Equipment</option>
-                <option value="STRUCTURAL_LOAD">Structural</option>
-            </select>
-            <div class="__renderbox-telemetry-legend hidden">
-                <span class="__renderbox-legend-min"></span>
-                <div class="__renderbox-legend-gradient"></div>
-                <span class="__renderbox-legend-max"></span>
             </div>
         </div>
     </div>
 
     <!-- Main Content Area: Message + Chat -->
     <div class="__renderbox-content">
+        <!-- Empty state logo (grayscale) -->
+        <svg class="__renderbox-empty-icon" width="80" height="88" viewBox="0 0 200 220" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <polyline points="40,205 40,22 112,75 112,205" stroke="currentColor" stroke-width="7" stroke-linejoin="round" stroke-linecap="round"/>
+            <polyline points="92,205 92,95 155,95 155,205" stroke="currentColor" stroke-width="7" stroke-linejoin="round" stroke-linecap="round"/>
+            <line x1="92" y1="128" x2="155" y2="205" stroke="currentColor" stroke-width="7" stroke-linecap="round"/>
+            <line x1="15" y1="212" x2="182" y2="212" stroke="currentColor" stroke-width="7" stroke-linecap="round"/>
+        </svg>
         <!-- Welcome Message (hidden by CSS) -->
         <div class="__renderbox-message">
             <p class="__renderbox-message-welcome">Welcome, <span class="__renderbox-user-name"></span></p>
@@ -103,11 +69,11 @@
                     style="display: none"
                     class="__renderbox-file-input"
                 />
-                <button class="__renderbox-attach" title="Attach files">
+                <label class="__renderbox-attach" title="Attach files" for="__renderbox-file-input">
                     <svg class="__renderbox-action-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.414a6 6 0 108.486 8.486L20.5 13"></path>
                     </svg>
-                </button>
+                </label>
                 <div
                     contenteditable="true"
                     placeholder="Describe the structure you want to generate..."

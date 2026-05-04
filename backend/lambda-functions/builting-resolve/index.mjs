@@ -17,10 +17,19 @@ import { assignIdentities } from './identity.mjs';
 import { buildCanonicalObservedEnvelope } from './schemas.mjs';
 import { validateSpatialSchema } from './spatialValidation.mjs';
 
+// Phase 13: Consumer + producer contract checks
+import { checkContractAsync, claimsContract, canonicalContract } from '@builting/contracts';
+// Phase 13 PR2: Trace writer
+import { writeTraceStart, writeTraceEnd } from '@builting/trace';
+// Phase 13.5 PR6: Audit log
+import { initAudit, flushAudit, logValidation } from '@builting/audit';
+// PR 8: Stage validators
+import { runResolveValidators } from './validators/resolve-validators.mjs';
+
 const s3 = new S3Client({});
 const DATA_BUCKET = process.env.DATA_BUCKET || 'builting-data';
 
-export const handler = async (event) => {
+export const handler = async (event, context) => {
   console.log('ResolveClaims input:', JSON.stringify({
     claimsS3Key: event.claimsS3Key,
     userId: event.userId,
@@ -53,6 +62,11 @@ export const handler = async (event) => {
     if (err.name !== 'NotFound' && err.$metadata?.httpStatusCode !== 404) throw err;
   }
 
+  // Phase 13 PR2: Trace start — written after idempotency/no-op guards so only real runs are traced.
+  const _traceRunId = context?.awsRequestId || `resolve-${Date.now()}`;
+  const _traceStartedAt = new Date().toISOString();
+  let _traceKey = null; let _traceAttemptN = 1;
+
   // No-op if claims weren't produced (legacy renders before Phase 1)
   if (!claimsS3Key) {
     console.log('No claimsS3Key — skipping resolve (legacy render)');
@@ -70,6 +84,14 @@ export const handler = async (event) => {
   const startTime = Date.now();
 
   try {
+    ({ key: _traceKey, attemptN: _traceAttemptN } = await writeTraceStart({
+      renderId, stage: 'resolve', runId: _traceRunId, startedAt: _traceStartedAt,
+      artifactKey: claimsS3Key,
+    }));
+  } catch (te) { console.warn('[trace] start write failed (non-fatal):', te.message); }
+  initAudit(renderId, 'resolve', _traceRunId);
+
+  try {
     // 1. Read claims.json from S3
     console.log(`Reading claims from s3://${dataBucket}/${claimsS3Key}`);
     const claimsObj = await s3.send(new GetObjectCommand({
@@ -80,7 +102,12 @@ export const handler = async (event) => {
     const claimsDoc = JSON.parse(claimsBody);
     console.log(`Claims loaded: ${claimsDoc.claims?.length || 0} claims, domain=${claimsDoc.domain}`);
 
-    // 2. Normalize claims
+    // Consumer contract check: validate claims.json on entry (halting).
+    await checkContractAsync('claimsContract', claimsContract, claimsDoc, {
+      halting: true,
+      renderId,
+      stage: 'resolve-entry',
+    });
     const normalizedDoc = normalizeClaims(claimsDoc);
 
     // 3. Spatial schema validation — after normalization, before resolve
@@ -143,8 +170,58 @@ export const handler = async (event) => {
       writeToS3(dataBucket, keys.identityMap, identityMap),
     ]);
 
+    // Producer self-check: canonical_observed (non-halting — diagnostic only,
+    // no downstream consumer reads this artifact in the current pipeline).
+    const _canonicalContractStatus = await checkContractAsync('canonicalContract', canonicalContract, canonicalObserved, {
+      halting: false,
+      renderId,
+      stage: 'resolve',
+    });
+
+    // Release 13.2: provenance completeness from observations
+    const _obsTotal = observationsWithIds.length;
+    let _obsProvPct = null;
+    if (_obsTotal > 0) {
+      const _obsAttributed = observationsWithIds.filter(
+        o => o.provenance?.sourceFileStatus && o.provenance.sourceFileStatus !== 'missing'
+      ).length;
+      _obsProvPct = Math.round(100 * _obsAttributed / _obsTotal);
+    }
+
     const durationMs = Date.now() - startTime;
     console.log(`ResolveClaims complete in ${durationMs}ms: ${observationsWithIds.length} observations, ${resolutionReport.droppedClaims.length} dropped, ${resolutionReport.summary.ambiguousGroups} ambiguous`);
+
+    // PR 8: Run resolve validators (all warning — non-halting)
+    let _resolveValSummary = { total: 0, passed: 0, warned: 0, failed: 0 };
+    try {
+      const _vr = runResolveValidators(
+        validatedDoc.claims,
+        observationsWithIds,
+        resolutionReport.droppedClaims,
+      );
+      for (const entry of _vr.entries) logValidation(entry);
+      _resolveValSummary = { total: _vr.total, passed: _vr.passed, warned: _vr.warned, failed: _vr.failed };
+    } catch (ve) { console.warn('[validators:resolve] Non-fatal:', ve.message); }
+
+    // Phase 13 PR2: Trace end (Release 13.2: + scalars)
+    try { await flushAudit(); } catch (ae) { console.warn('[audit:flush_failed]', ae.message); }
+    if (_traceKey) {
+      try {
+        await writeTraceEnd({
+          traceKey: _traceKey, stage: 'resolve', runId: _traceRunId, attemptN: _traceAttemptN,
+          startedAt: _traceStartedAt, finishedAt: new Date().toISOString(),
+          outputArtifactKey: keys.canonicalObserved,
+          counts: { observations: observationsWithIds.length, rejected: resolutionReport.droppedClaims.length },
+          validationFlags: [],
+          scalars: {
+            gatePassRate: null,
+            contractStatus: _canonicalContractStatus ?? 'pass',
+            provenanceCompleteness: _obsProvPct,
+            validationSummary: _resolveValSummary,
+          },
+        });
+      } catch (te) { console.warn('[trace] end write failed (non-fatal):', te.message); }
+    }
 
     return {
       normalizedClaimsS3Key: keys.normalizedClaims,

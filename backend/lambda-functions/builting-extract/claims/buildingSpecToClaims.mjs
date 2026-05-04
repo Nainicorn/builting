@@ -6,8 +6,8 @@
  */
 
 import {
-  buildClaim, buildEvidence, typeToKind, inferDiscipline,
-  CLAIM_KINDS, EXTRACTION_METHODS, COORDINATE_SOURCES, SOURCE_ROLES
+  buildClaim, buildEvidence, buildProvenance, typeToKind, inferDiscipline,
+  CLAIM_KINDS, EXTRACTION_METHODS, COORDINATE_SOURCES, SOURCE_ROLES, PROVENANCE_STATUS
 } from './claimsSchema.mjs';
 
 /**
@@ -23,6 +23,11 @@ export function buildingSpecToClaims(css, sourceFiles = [], options = {}) {
   const extractionMethod = options.isRefinement
     ? EXTRACTION_METHODS.LLM_REFINEMENT
     : EXTRACTION_METHODS.LLM_EXTRACTION;
+
+  function provFor(sf) {
+    const f = sf || null;
+    return buildProvenance(f, f ? PROVENANCE_STATUS.DIRECT : PROVENANCE_STATUS.MISSING, 'extract');
+  }
 
   // Build evidence from source files
   function buildEvidenceForElement(el) {
@@ -75,6 +80,7 @@ export function buildingSpecToClaims(css, sourceFiles = [], options = {}) {
         confidence: 0.70,
         fieldConfidence: { dimensions: 0.65, placement: 0.60 },
         discipline: isTunnel ? 'civil' : 'architectural',
+        provenance: provFor(sourceFiles[0]?.name || null),
       }
     ));
   }
@@ -101,6 +107,21 @@ export function buildingSpecToClaims(css, sourceFiles = [], options = {}) {
       fieldConfidence.placement = Math.min(fieldConfidence.placement + 0.10, 0.90);
     }
 
+    // GAP 15: Map spatial containment fields to properties for topology engine
+    const spatialContainmentProps = {};
+    if (el.duct_host_segment) {
+      spatialContainmentProps.hostSegmentId = el.duct_host_segment;
+    }
+    if (el.equipment_mounting_zone) {
+      spatialContainmentProps.mountingZone = el.equipment_mounting_zone;
+    }
+    if (el.equipment_z_offset_m != null) {
+      spatialContainmentProps.zOffset_m = el.equipment_z_offset_m;
+    }
+    if (el.equipment_longitudinal_position_m != null) {
+      spatialContainmentProps.longitudinalPosition_m = el.equipment_longitudinal_position_m;
+    }
+
     const attributes = {
       id: el.id,
       element_key: el.element_key,
@@ -111,7 +132,10 @@ export function buildingSpecToClaims(css, sourceFiles = [], options = {}) {
       geometry: el.geometry,
       container: el.container,
       relationships: el.relationships || [],
-      properties: el.properties || {},
+      properties: {
+        ...(el.properties || {}),
+        ...spatialContainmentProps,
+      },
       material: el.material,
       source: el.source,
       sourceFile: el.sourceFile,
@@ -129,6 +153,7 @@ export function buildingSpecToClaims(css, sourceFiles = [], options = {}) {
       aliases.push(el.properties.assetTag);
     }
 
+    const elSourceFile = el.sourceFile || el.source || sourceFiles[0]?.name || null;
     claims.push(buildClaim(
       kind,
       subjectId,
@@ -139,6 +164,7 @@ export function buildingSpecToClaims(css, sourceFiles = [], options = {}) {
         fieldConfidence,
         discipline: inferDiscipline(el.type, el.properties),
         aliases,
+        provenance: provFor(elSourceFile),
       }
     ));
   }

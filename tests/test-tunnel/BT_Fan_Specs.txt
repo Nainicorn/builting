@@ -1,0 +1,68 @@
+BEGGARS TOMB — FAN SPECIFICATIONS AND NAME MAPPING
+====================================================
+This file maps VentSim fan names (used in .vsm and PDFs) to the
+correct IFC/Revit family names from BT_07.ifc. Use these exact
+specs for fan generation. The PDF spec sheets (AC_Fan.pdf,
+Diesel_Exhuast_Fan.pdf, Shaft_Fan.pdf) contain additional
+manufacturer data — consult them for physical dimensions only.
+
+NAME MAPPING (VSM → IFC)
+--------------------------
+VSM "AC Fan"            → IFC "Centrifugal Fan - Inline - Belt Drive: 9500 CFM"
+VSM "Diesel Exhaust Fan"→ IFC "Centrifugal Fan - Inline - Belt Drive: 19000 CFM"
+VSM "Shaft Fan"         → IFC "AHU Fan Module - Rear Discharge Up: 50 sq ft coil"
+
+FAN 1 — AC Room Fan (9500 CFM)
+--------------------------------
+IFC Family:       Centrifugal Fan - Inline - Belt Drive
+IFC Type:         9500 CFM
+IFC Entity:       IfcBuildingElementProxy
+Capacity:         9500 CFM (4484 L/s)
+Outlet diameter:  152.4 mm (6 inches) — connects to 500mm main duct via transition
+Location:         AC Room (east side of facility, Level 0)
+System:           Mechanical Exhaust_Air (System 1 or 5 — smallest exhaust branch)
+Connection:       M_Rectangular to Round Transition - Angle 15 Degree fitting
+                  transitions from fan rectangular discharge to 500mm round main duct
+
+FAN 2 — Generator Room Exhaust Fan (19000 CFM)
+------------------------------------------------
+IFC Family:       Centrifugal Fan - Inline - Belt Drive
+IFC Type:         19000 CFM
+IFC Entity:       IfcBuildingElementProxy
+Capacity:         19000 CFM (8968 L/s)
+Outlet diameter:  203.2 mm (8 inches) — connects to 500mm main duct via transition
+Location:         Generator room / main exhaust path (Level 0/1 boundary)
+System:           Mechanical Exhaust_Air (System 2 or 3 — largest exhaust branch)
+Connection:       M_Rectangular to Round Transition - Angle 15 Degree fitting
+
+FAN 3 — Shaft Fan / AHU
+--------------------------
+IFC Family:       AHU Fan Module - Rear Discharge Up
+IFC Type:         For 50 Square Feet of Coil
+IFC Entity:       IfcBuildingElementProxy
+Location:         Shaft base or adjacent plant room (Level 0)
+System:           Mechanical Exhaust_Air (System 4 — shaft exhaust)
+Connection:       Connects to shaft duct run
+
+GENERATOR (not a fan — included here for completeness)
+-------------------------------------------------------
+IFC Family:       3512C 1500 kW Tier 2
+IFC Manufacturer: Caterpillar (CAT)
+IFC Entity:       IfcBuildingElementProxy
+Capacity:         1500 kW electrical / 315 kW sensible heat to room
+Rating:           1875 kVA @ 60 Hz, Tier 2, air-cooled
+Quantity:         2 units placed in center of generator room
+Colors:           CAT Yellow body / CAT Black details
+Fuel:             Diesel, 14-day integral storage capacity
+Location:         Diesel Generator Room center, Level 0
+
+DUCT CONNECTION SUMMARY
+------------------------
+All primary duct runs: 500mm (0.5m) diameter Round Standard
+Fan outlet connections:
+  9500 CFM → 152.4mm outlet → 15° rect-to-round transition → 500mm main duct
+  19000 CFM → 203.2mm outlet → 15° rect-to-round transition → 500mm main duct
+  AHU shaft → connects directly to shaft duct (500mm or matched)
+
+All elbows: M_Round Elbow 1D (1 × diameter bend radius = 500mm radius)
+Quantity: 25 elbows in total duct network

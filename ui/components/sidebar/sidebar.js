@@ -72,6 +72,16 @@ const sidebar = {
 
     // Bind listeners if needed
     _bindListeners() {
+        // Sidebar toggle button
+        const toggleBtn = this.element?.querySelector('.__sidebar-toggle');
+        if (toggleBtn) {
+            toggleBtn.addEventListener('click', () => {
+                const isCollapsed = document.body.getAttribute('data-collapsed') === 'true';
+                document.body.setAttribute('data-collapsed', isCollapsed ? 'false' : 'true');
+                document.dispatchEvent(new CustomEvent('sidebarToggled'));
+            });
+        }
+
         // Listen for renders list updates
         document.addEventListener('rendersUpdated', () => {
             this.loadRenders(true);
@@ -148,8 +158,8 @@ const sidebar = {
         const rendersContainer = this.element.querySelector('.__sidebar-renders');
         if (!rendersContainer) return;
 
-        // Filter out failed renders
-        const visibleRenders = renders.filter(r => r.status !== 'failed');
+        // Filter out failed renders (including contract failures)
+        const visibleRenders = renders.filter(r => r.status !== 'failed' && r.status !== 'failed_contract');
         const emptyEl = this.element.querySelector('.__sidebar-empty');
 
         if (visibleRenders.length === 0) {
@@ -210,23 +220,25 @@ const sidebar = {
                        <path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6"/>
                    </svg>`;
 
+            const deleteBtn = render.is_demo_render ? '' : `
+                        <button class="__render-delete-btn" title="Delete render" aria-label="Delete render">
+                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                            </svg>
+                        </button>`;
+
             return `
                 <div class="__render-item" data-render-id="${render.render_id}" tabindex="0" role="button" aria-label="${fullTitle} — ${statusLabel}">
                     <div class="__render-thumb">
                         ${thumbContent}
                         <span class="__render-item-status-dot ${dotClass}" title="${statusLabel}"></span>
-                        ${status !== 'completed' ? `<span class="__render-item-status-label __render-item-status-label--${status}">${statusLabel}</span>` : ''}
                     </div>
                     <div class="__render-item-info">
                         <div class="__render-item-content">
                             <span class="__render-item-title" title="${fullTitle}">${fullTitle}</span>
                             <span class="__render-item-meta">${metaLine}</span>
                         </div>
-                        <button class="__render-delete-btn" title="Delete render" aria-label="Delete render">
-                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
-                            </svg>
-                        </button>
+                        ${deleteBtn}
                     </div>
                 </div>
             `;

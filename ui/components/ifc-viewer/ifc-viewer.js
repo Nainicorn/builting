@@ -311,7 +311,43 @@ const ifcViewer = {
         return rels.length > 0 ? rels : null;
     },
 
-    getSnapshot(size = 200) {
+    /**
+     * Snap camera to a clean isometric angle before taking the thumbnail.
+     * Returns a promise that resolves after one rendered frame.
+     */
+    positionForThumbnail() {
+        return new Promise((resolve) => {
+            if (!this.viewer || !this.currentModel) { resolve(); return; }
+            try {
+                const aabb = this.currentModel.aabb;
+                if (!aabb) { resolve(); return; }
+
+                const cx = (aabb[0] + aabb[3]) / 2;
+                const cy = (aabb[1] + aabb[4]) / 2;
+                const cz = (aabb[2] + aabb[5]) / 2;
+                const dx = aabb[3] - aabb[0];
+                const dy = aabb[4] - aabb[1];
+                const dz = aabb[5] - aabb[2];
+                const radius = Math.max(dx, dy, dz) * 0.85;
+
+                // Front-right-top isometric angle: consistent regardless of model orientation
+                const angle = Math.PI / 4; // 45 degrees
+                const eyeX = cx + radius * Math.cos(angle);
+                const eyeY = cy - radius * Math.sin(angle);
+                const eyeZ = cz + radius * 0.55;
+
+                this.viewer.camera.eye = [eyeX, eyeY, eyeZ];
+                this.viewer.camera.look = [cx, cy, cz];
+                this.viewer.camera.up = [0, 0, 1];
+
+                try { this.viewer.scene.render(true); } catch (_) {}
+            } catch (_) {}
+
+            requestAnimationFrame(() => requestAnimationFrame(resolve));
+        });
+    },
+
+    getSnapshot(size = 400) {
         try {
             let srcCanvas = this.viewer?.scene?.canvas?.canvas;
             if (!srcCanvas) srcCanvas = document.getElementById('ifc-viewer-canvas');
@@ -343,7 +379,7 @@ const ifcViewer = {
             const totalSampled = Math.ceil(sample.length / (step * 4));
             if (nonBgPixels / totalSampled < 0.005) return null;
 
-            return offscreen.toDataURL('image/jpeg', 0.72);
+            return offscreen.toDataURL('image/jpeg', 0.90);
         } catch (_) {
             return null;
         }
@@ -370,97 +406,6 @@ const ifcViewer = {
                 document.dispatchEvent(new CustomEvent('elementPickCleared'));
             }
         });
-    },
-
-    // ==================== Telemetry Overlay ====================
-
-    _overlayActive: false,
-    _colorizedEntityIds: [],
-
-    _statusColors: {
-        running: [0.13, 0.77, 0.37],
-        idle:    [0.98, 0.80, 0.08],
-        fault:   [0.94, 0.26, 0.26],
-    },
-
-    applyTelemetryOverlay(sensors, filterType = 'all') {
-        if (!this.viewer || !sensors || sensors.length === 0) return;
-
-        this.clearTelemetryOverlay();
-        this._overlayActive = true;
-
-        const sensorsByType = {};
-        for (const s of sensors) {
-            if (filterType !== 'all' && s.sensor_type !== filterType) continue;
-            const key = s.element_type;
-            if (!sensorsByType[key]) sensorsByType[key] = [];
-            sensorsByType[key].push(s);
-        }
-
-        if (Object.keys(sensorsByType).length === 0) return;
-
-        const metaObjects = this.viewer.metaScene?.metaObjects || {};
-        for (const [entityId, metaObj] of Object.entries(metaObjects)) {
-            const typeSensors = sensorsByType[metaObj.type];
-            if (!typeSensors || typeSensors.length === 0) continue;
-
-            const entity = this.viewer.scene.objects[entityId];
-            if (!entity) continue;
-
-            const sensor = typeSensors[0];
-            let color;
-
-            if (sensor.unit === null && this._statusColors[sensor.current_value]) {
-                color = this._statusColors[sensor.current_value];
-            } else if (sensor.min_range !== null && sensor.max_range !== null) {
-                const normalized = Math.max(0, Math.min(1,
-                    (sensor.current_value - sensor.min_range) / (sensor.max_range - sensor.min_range)
-                ));
-                color = this._valueToHeatColor(normalized);
-            }
-
-            if (color) {
-                entity.colorize = color;
-                this._colorizedEntityIds.push(entityId);
-            }
-        }
-    },
-
-    clearTelemetryOverlay() {
-        if (!this.viewer) return;
-        for (const entityId of this._colorizedEntityIds) {
-            const entity = this.viewer.scene.objects[entityId];
-            if (entity) entity.colorize = null;
-        }
-        this._colorizedEntityIds = [];
-        this._overlayActive = false;
-    },
-
-    _valueToHeatColor(t) {
-        const stops = [
-            [0.00, 0.23, 0.51, 0.96],
-            [0.33, 0.13, 0.77, 0.37],
-            [0.66, 0.98, 0.80, 0.08],
-            [1.00, 0.94, 0.26, 0.26],
-        ];
-
-        let lower = stops[0], upper = stops[stops.length - 1];
-        for (let i = 0; i < stops.length - 1; i++) {
-            if (t >= stops[i][0] && t <= stops[i + 1][0]) {
-                lower = stops[i];
-                upper = stops[i + 1];
-                break;
-            }
-        }
-
-        const range = upper[0] - lower[0];
-        const f = range > 0 ? (t - lower[0]) / range : 0;
-
-        return [
-            lower[1] + f * (upper[1] - lower[1]),
-            lower[2] + f * (upper[2] - lower[2]),
-            lower[3] + f * (upper[3] - lower[3]),
-        ];
     },
 
     destroy() {

@@ -1,0 +1,57 @@
+name: contract-roundtrip
+
+# Phase 13 PR 1 — verifies every fixture in backend/shared/contracts/fixtures
+# validates equivalently on Zod (Node) and Pydantic (Python). Fails on:
+#   - Verdict mismatch between the two validators on any fixture
+#   - Positive fixture failing on either side
+#   - Negative fixture passing on either side
+#   - Missing required negative-fixture category (shape/boundary/cross_field)
+#     unless the contract explicitly opts out via skipCategories
+#   - Orphan zod/ or pydantic/ files with no entry in contracts.config.mjs
+#
+# Calibration against real S3 artifacts is NOT in CI — it requires AWS
+# credentials and queries production data. Run it locally before merging
+# changes that loosen constraints.
+
+on:
+  pull_request:
+    paths:
+      - 'backend/shared/contracts/**'
+      - '.github/workflows/contract-roundtrip.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'backend/shared/contracts/**'
+      - '.github/workflows/contract-roundtrip.yml'
+
+jobs:
+  roundtrip:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend/shared/contracts
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: backend/shared/contracts/package-lock.json
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Zod (Node side)
+        run: npm install --no-audit --no-fund
+
+      - name: Install Pydantic (Python side)
+        run: pip install -e ./pydantic
+
+      - name: Run round-trip
+        env:
+          PYTHONPATH: ${{ github.workspace }}/backend/shared/contracts/pydantic
+        run: node ci/run-roundtrip.mjs

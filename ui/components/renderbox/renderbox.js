@@ -5,8 +5,6 @@ import uploadService from '../../services/uploadService.js';
 import usersService from '../../services/usersService.js';
 import rendersService from '../../services/rendersService.js';
 import modalService from '../../services/modalService.js';
-import sensorService from '../../services/sensorService.js';
-
 const renderbox = {
     element: null,
     viewerCanvas: null,
@@ -20,8 +18,6 @@ const renderbox = {
     currentRenderTitle: null, // AI-generated title of the active render (for download filename)
     _onElementPicked: null,   // Stored handler refs for deduplication
     _onElementPickCleared: null,
-    _telemetryActive: false,  // Whether sensor overlay is currently on
-    _currentSensors: [],      // Latest sensor data from polling
 
     // Initialize the renderbox component
     async init() {
@@ -37,6 +33,9 @@ const renderbox = {
         this.element.innerHTML = html;
         // Set initial state
         this.element.dataset.state = 'new-render';
+        // Apply is-empty so placeholder CSS shows on load
+        const descInput = this.element.querySelector('.__renderbox-description');
+        if (descInput) descInput.classList.add('is-empty');
     },
 
     // Load data and initialize viewer
@@ -155,16 +154,6 @@ const renderbox = {
             // Load via ArrayBuffer (xeokit will handle it directly without HTTP fetch)
             await ifcViewer.loadIFC(arrayBuffer);
 
-            // Race-condition guard: if telemetry was toggled on before the model finished
-            // loading, the overlay callback would have bailed out in applyTelemetryOverlay.
-            // Now that the model is ready, re-apply with the most recent sensor data.
-            if (this._telemetryActive && this._currentSensors && this._currentSensors.length > 0) {
-                const typeSelect = this.element.querySelector('.__renderbox-telemetry-type');
-                const filterType = typeSelect?.value || 'all';
-                console.log('[Telemetry] Model loaded — re-applying overlay with cached sensor data');
-                ifcViewer.applyTelemetryOverlay(this._currentSensors, filterType);
-            }
-
             // Resize viewer after layout change and focus canvas for interaction
             ifcViewer.resize();
             const canvas = this.element.querySelector('#ifc-viewer-canvas');
@@ -205,7 +194,6 @@ const renderbox = {
         this._updateInputPlaceholder('Describe the structure you want to generate...');
         this._updateInputLabel('Describe your structure');
         this._clearDescriptionInput();
-        this._hideTelemetryControls();
         // Show welcome message again
         const messageEl = this.element.querySelector('.__renderbox-message');
         if (messageEl) {
@@ -237,27 +225,45 @@ const renderbox = {
             }
 
             if (render.status === 'completed') {
-                // Set renderId before load so thumbnail capture can use it
+                // Set state immediately so UI reflects selection
                 this.element.dataset.renderId = renderId;
                 this.element.dataset.state = 'viewing-render';
-
-                // Load IFC from backend
-                const { downloadUrl } = await rendersService.getDownloadUrl(renderId);
-                await this.loadIFCFromUrl(downloadUrl);
                 this.currentRenderTitle = render.ai_generated_title || render.title || null;
                 this._updateMessage('');
                 this._updateInputPlaceholder('Describe refinements to apply...');
                 this._updateInputLabel('Refinement');
                 this._clearDescriptionInput();
+                this.stagedFiles = [];
+                this._updateFilePreview();
 
-                this._hideTelemetryControls(); // Reset any active telemetry from previous render
-                this._showTelemetryControls();
-                this._updateExportFormats(render);
-
-                // Notify details sidebar with full render object
+                // Open details panel immediately — don't wait for IFC to finish loading
                 document.dispatchEvent(new CustomEvent('renderSelected', {
                     detail: { render }
                 }));
+
+                // Load IFC (may take time; errors here don't block the details panel)
+                try {
+                    const { downloadUrl } = await rendersService.getDownloadUrl(renderId);
+                    await this.loadIFCFromUrl(downloadUrl);
+                } catch (ifcError) {
+                    console.error('IFC load error:', ifcError);
+                    this._showError('Failed to load 3D model: ' + ifcError.message);
+                }
+            } else if (render.status === 'failed_contract') {
+                const errorMsg = render.error_message || 'A pipeline contract check detected a schema violation in the generated data.';
+                const action = await modalService.choice(
+                    '⚠ Schema Validation Failed',
+                    `This render was stopped because a data contract check failed — the pipeline output did not match the expected schema.\n\nThis usually means the input files produced unexpected data. Retrying the same files is unlikely to help.\n\nDetails: ${errorMsg}`,
+                    [
+                        { text: 'Keep', value: 'keep' },
+                        { text: 'Delete', value: 'delete', primary: true }
+                    ]
+                );
+                if (action === 'delete') {
+                    await rendersService.deleteRender(renderId);
+                    document.dispatchEvent(new CustomEvent('rendersUpdated'));
+                    document.dispatchEvent(new CustomEvent('newRenderRequested'));
+                }
             } else if (render.status === 'failed') {
                 const errorMsg = render.error_message || 'Unknown error occurred during rendering';
                 const action = await modalService.choice(
@@ -381,10 +387,7 @@ const renderbox = {
 
         if (this.stagedFiles.length === 0) {
             stagingSection.classList.add('hidden');
-            if (attachBtn) {
-                attachBtn.disabled = false;
-                attachBtn.style.opacity = '1';
-            }
+            if (attachBtn) attachBtn.classList.remove('is-disabled');
             return;
         }
 
@@ -406,15 +409,13 @@ const renderbox = {
             `;
         }).join('');
 
-        // Disable attach button if max files reached
+        // Disable attach label if max files reached
         if (attachBtn) {
             if (this.stagedFiles.length >= this.MAX_FILES) {
-                attachBtn.disabled = true;
-                attachBtn.style.opacity = '0.5';
+                attachBtn.classList.add('is-disabled');
                 attachBtn.title = `Maximum ${this.MAX_FILES} files reached`;
             } else {
-                attachBtn.disabled = false;
-                attachBtn.style.opacity = '1';
+                attachBtn.classList.remove('is-disabled');
                 attachBtn.title = 'Attach files';
             }
         }
@@ -557,8 +558,7 @@ const renderbox = {
             const geoEl  = panel.querySelector('.__renderbox-panel-geometry');
             const relEl  = panel.querySelector('.__renderbox-panel-relationships');
             const provEl = panel.querySelector('.__renderbox-panel-provenance');
-            const psetsEl = panel.querySelector('.__renderbox-panel-psets');
-            [geoEl, relEl, provEl, psetsEl].forEach(el => {
+            [geoEl, relEl, provEl].forEach(el => {
                 if (el) { el.innerHTML = ''; el.classList.remove('has-separator'); }
             });
 
@@ -598,35 +598,63 @@ const renderbox = {
                     }
                 }
 
-                // ── Source Provenance ─────────────────────────────────────
+                // ── Provenance (Pset_BuiltingProvenance + others) ─────────
+                // Source file references are display labels only — do not add hyperlinks;
+                // these are S3 key fragments with no public URL.
                 if (provEl && provGroups.length > 0) {
-                    let html = `<div class="__renderbox-panel-section-label">Source Provenance</div>`;
-                    for (const g of provGroups) {
-                        const rows = g.props.map(p => buildRow(p.name, p.value)).join('');
-                        if (!rows) continue;
-                        html += `<div class="__renderbox-panel-pset-group">` +
-                            `<div class="__renderbox-panel-pset-name">${esc(g.name)}</div>` +
-                            rows + `</div>`;
-                    }
-                    provEl.innerHTML = html;
-                }
+                    let html = '';
 
-                // ── Property Sets ─────────────────────────────────────────
-                if (psetsEl && regularGroups.length > 0) {
-                    let html = `<div class="__renderbox-panel-section-label">Properties</div>`;
-                    for (const g of regularGroups) {
+                    const builtingPset = provGroups.find(g => g.name === 'Pset_BuiltingProvenance');
+                    if (builtingPset) {
+                        const getVal = (name) => builtingPset.props.find(p => p.name === name)?.value || '';
+                        const status = getVal('SourceFileStatus');
+                        const sourceFile = getVal('SourceFile');
+                        const stage = getVal('Stage');
+                        const mods = getVal('Modifications');
+
+                        const KNOWN_STATUSES = new Set([
+                            'direct', 'inherited_consensus', 'inherited_contested',
+                            'derived_geometric', 'derived_inferred', 'missing', 'legacy',
+                        ]);
+
+                        let sourceDisplay;
+                        if (!status) {
+                            sourceDisplay = 'Source: not recorded (legacy render)';
+                        } else if (status === 'missing') {
+                            sourceDisplay = 'Source: unknown';
+                        } else if (status === 'derived_inferred') {
+                            sourceDisplay = 'Source: inferred (no upstream file)';
+                        } else if (status === 'inherited_contested') {
+                            sourceDisplay = `Source: ${sourceFile} (contested)`;
+                        } else if (!KNOWN_STATUSES.has(status)) {
+                            console.warn('[IFC] Unknown provenance status:', status);
+                            sourceDisplay = 'Source: unknown';
+                        } else {
+                            sourceDisplay = `Source: ${sourceFile || '<unknown>'}`;
+                        }
+
+                        html += `<div class="__renderbox-panel-section-label">Provenance</div>`;
+                        html += `<div class="__renderbox-panel-row"><span class="__renderbox-panel-row-val">${esc(sourceDisplay)}</span></div>`;
+                        if (stage) html += buildRow('Stage', stage);
+                        if (mods) html += buildRow('Modifications', mods);
+                    }
+
+                    const otherProvGroups = provGroups.filter(g => g.name !== 'Pset_BuiltingProvenance');
+                    for (const g of otherProvGroups) {
+                        if (!html) html += `<div class="__renderbox-panel-section-label">Source Provenance</div>`;
                         const rows = g.props.map(p => buildRow(p.name, p.value)).join('');
                         if (!rows) continue;
                         html += `<div class="__renderbox-panel-pset-group">` +
                             `<div class="__renderbox-panel-pset-name">${esc(g.name)}</div>` +
                             rows + `</div>`;
                     }
-                    psetsEl.innerHTML = html;
+
+                    if (html) provEl.innerHTML = html;
                 }
 
                 // Add visual separators between populated sections
                 let firstFilled = true;
-                for (const el of [geoEl, relEl, provEl, psetsEl]) {
+                for (const el of [geoEl, relEl, provEl]) {
                     if (!el || !el.innerHTML) continue;
                     if (!firstFilled) el.classList.add('has-separator');
                     firstFilled = false;
@@ -695,18 +723,12 @@ const renderbox = {
             }
         });
 
-        // File upload button (attach icon) click
-        const attachBtn = this.element.querySelector('.__renderbox-attach');
+        // File input change — label[for] handles opening the picker natively
         const fileInput = this.element.querySelector('#__renderbox-file-input');
-
-        if (attachBtn && fileInput) {
-            attachBtn.addEventListener('click', () => {
-                fileInput.click();
-            });
-
+        if (fileInput) {
             fileInput.addEventListener('change', (e) => {
                 this._handleFileSelected(e.target.files);
-                // Reset input so same file can be selected again
+                // Reset so the same file can be selected again
                 e.target.value = '';
             });
         }
@@ -768,51 +790,6 @@ const renderbox = {
             });
         }
 
-        // Download format chevron + dropdown
-        const chevronBtn = this.element.querySelector('.__renderbox-download-chevron');
-        const dropdown = this.element.querySelector('.__renderbox-download-dropdown');
-        if (chevronBtn && dropdown) {
-            chevronBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                const isOpen = !dropdown.classList.contains('hidden');
-                dropdown.classList.toggle('hidden');
-            });
-
-            dropdown.querySelectorAll('.__renderbox-download-option').forEach(btn => {
-                btn.addEventListener('click', async (e) => {
-                    e.stopPropagation();
-                    dropdown.classList.add('hidden');
-                    const format = btn.dataset.format;
-                    await this._handleDownload(format);
-                });
-            });
-
-            // Click-away to close dropdown
-            document.addEventListener('click', (e) => {
-                if (!e.target.closest('.__renderbox-download-group')) {
-                    dropdown.classList.add('hidden');
-                }
-            });
-        }
-
-        // Telemetry overlay controls
-        const telemetryToggle = this.element.querySelector('.__renderbox-telemetry-toggle');
-        const telemetryType = this.element.querySelector('.__renderbox-telemetry-type');
-
-        if (telemetryToggle) {
-            telemetryToggle.addEventListener('click', () => {
-                this._toggleTelemetry();
-            });
-        }
-
-        if (telemetryType) {
-            telemetryType.addEventListener('change', () => {
-                if (this._telemetryActive && this._currentSensors.length > 0) {
-                    ifcViewer.applyTelemetryOverlay(this._currentSensors, telemetryType.value);
-                    this._updateLegend(telemetryType.value);
-                }
-            });
-        }
     },
 
 
@@ -833,7 +810,7 @@ const renderbox = {
         const startBtn = this.element.querySelector('.__renderbox-start');
         const attachBtn = this.element.querySelector('.__renderbox-attach');
         if (startBtn) startBtn.disabled = true;
-        if (attachBtn) attachBtn.disabled = true;
+        if (attachBtn) attachBtn.classList.add('is-disabled');
     },
 
     /**
@@ -849,7 +826,7 @@ const renderbox = {
         const startBtn = this.element.querySelector('.__renderbox-start');
         const attachBtn = this.element.querySelector('.__renderbox-attach');
         if (startBtn) startBtn.disabled = false;
-        if (attachBtn) attachBtn.disabled = false;
+        if (attachBtn) attachBtn.classList.remove('is-disabled');
     },
 
     /**
@@ -900,6 +877,24 @@ const renderbox = {
 
             if (render.status === 'completed') {
                 this._handleRenderCompleted(render);
+                return;
+            } else if (render.status === 'failed_contract') {
+                this._stopPolling();
+                this._hideLoadingState();
+
+                const errorMsg = render.error_message || 'A pipeline contract check detected a schema violation.';
+                console.error('[contract_failure] render stopped at contract check:', errorMsg);
+
+                const action = await modalService.choice(
+                    '⚠ Schema Validation Failed',
+                    `Your render was stopped because a data contract check failed.\n\nThis means the pipeline output did not match the expected schema. Retrying the same files is unlikely to help — the input may need to be revised.\n\nDetails: ${errorMsg}`,
+                    [
+                        { text: 'New Render', value: 'new', primary: true }
+                    ]
+                );
+
+                this._handleNewRender();
+                document.dispatchEvent(new CustomEvent('rendersUpdated'));
                 return;
             } else if (render.status === 'failed') {
                 this._stopPolling();
@@ -1027,26 +1022,6 @@ const renderbox = {
     },
 
     /**
-     * Show a brief toast notification
-     */
-    _showToast(message) {
-        let toast = document.querySelector('.__toast');
-        if (!toast) {
-            toast = document.createElement('div');
-            toast.className = '__toast';
-            toast.innerHTML = '<span class="__toast-icon">&#10003;</span><span class="__toast-text"></span>';
-            document.body.appendChild(toast);
-        }
-        toast.querySelector('.__toast-text').textContent = message;
-        // Trigger reflow for animation restart
-        toast.classList.remove('--visible');
-        void toast.offsetWidth;
-        toast.classList.add('--visible');
-        clearTimeout(this._toastTimer);
-        this._toastTimer = setTimeout(() => toast.classList.remove('--visible'), 2500);
-    },
-
-    /**
      * Handle download in requested format (ifc, glb, obj)
      */
     async _handleDownload(format = 'ifc') {
@@ -1076,31 +1051,12 @@ const renderbox = {
             document.body.removeChild(link);
             URL.revokeObjectURL(blobUrl);
 
-            this._showToast(`Downloaded ${ext.toUpperCase()} file`);
         } catch (error) {
             console.error('Error downloading render:', error);
             this._showError('Failed to download render: ' + error.message);
         }
     },
 
-    /**
-     * Show/hide export format dropdown chevron based on available formats
-     */
-    _updateExportFormats(render) {
-        const chevron = this.element.querySelector('.__renderbox-download-chevron');
-        if (!chevron) return;
-
-        const formats = render.exportFormats || render.export_formats || ['IFC4'];
-        const hasMultiple = formats.length > 1;
-        chevron.classList.toggle('hidden', !hasMultiple);
-
-        // Hide unavailable format options
-        const dropdown = this.element.querySelector('.__renderbox-download-dropdown');
-        if (dropdown) {
-            dropdown.querySelector('[data-format="glb"]').classList.toggle('hidden', !formats.includes('glTF'));
-            dropdown.querySelector('[data-format="obj"]').classList.toggle('hidden', !formats.includes('OBJ'));
-        }
-    },
 
     /**
      * Handle render completion
@@ -1119,9 +1075,6 @@ const renderbox = {
             this.currentRenderTitle = render.ai_generated_title || render.title || null;
             this._updateInputPlaceholder('Describe refinements to apply...');
             this._updateInputLabel('Refinement');
-            this._hideTelemetryControls(); // Reset any active telemetry from previous render
-            this._showTelemetryControls();
-            this._updateExportFormats(render);
 
             // Notify details sidebar with full render object
             document.dispatchEvent(new CustomEvent('renderSelected', {
@@ -1168,26 +1121,19 @@ const renderbox = {
             return;
         }
 
-        // Fallback: progressive retry
+        // Fallback: progressive retry with isometric positioning
         setTimeout(() => {
-            // Abort if render switched
             if (this.element.dataset.renderId !== renderId) return;
-
-            if (ifcViewer.viewer) {
-                try { ifcViewer.viewer.scene.render(true); } catch (_) {}
-            }
-            requestAnimationFrame(() => {
-                requestAnimationFrame(() => {
-                    if (this.element.dataset.renderId !== renderId) return;
-                    const snap = ifcViewer.getSnapshot();
-                    if (snap) {
-                        document.dispatchEvent(new CustomEvent('thumbnailCaptured', {
-                            detail: { renderId, dataUrl: snap }
-                        }));
-                    } else if (attempt < maxAttempts - 1) {
-                        this._captureThumbnail(renderId, attempt + 1);
-                    }
-                });
+            ifcViewer.positionForThumbnail().then(() => {
+                if (this.element.dataset.renderId !== renderId) return;
+                const snap = ifcViewer.getSnapshot();
+                if (snap) {
+                    document.dispatchEvent(new CustomEvent('thumbnailCaptured', {
+                        detail: { renderId, dataUrl: snap }
+                    }));
+                } else if (attempt < maxAttempts - 1) {
+                    this._captureThumbnail(renderId, attempt + 1);
+                }
             });
         }, delays[attempt]);
     },
@@ -1228,10 +1174,8 @@ const renderbox = {
             lastCount = currentCount;
 
             if (stableChecks >= 2 && currentCount > 0) {
-                // Settled — force render and capture
-                try { ifcViewer.viewer.scene.render(true); } catch (_) {}
-                requestAnimationFrame(() => {
-                    // Final check: still the active render?
+                // Settled — position camera to clean isometric angle, then capture
+                ifcViewer.positionForThumbnail().then(() => {
                     if (this.element.dataset.renderId !== renderId) return;
                     const snap = ifcViewer.getSnapshot();
                     if (snap) {
@@ -1239,7 +1183,6 @@ const renderbox = {
                             detail: { renderId, dataUrl: snap }
                         }));
                     } else {
-                        // Settled but blank — fall back to retry
                         this._captureThumbnail(renderId, 1);
                     }
                 });
@@ -1259,106 +1202,6 @@ const renderbox = {
         this._thumbPollTimer = setTimeout(poll, pollInterval);
     },
 
-    // ==================== Telemetry Overlay ====================
-
-    /**
-     * Show telemetry controls (called when viewing a completed render)
-     */
-    _showTelemetryControls() {
-        const controls = this.element.querySelector('.__renderbox-telemetry');
-        if (controls) controls.classList.remove('hidden');
-    },
-
-    /**
-     * Hide telemetry controls and clean up overlay
-     */
-    _hideTelemetryControls() {
-        const controls = this.element.querySelector('.__renderbox-telemetry');
-        if (controls) controls.classList.add('hidden');
-
-        if (this._telemetryActive) {
-            this._telemetryActive = false;
-            this._currentSensors = [];
-            sensorService.stopPolling();
-            ifcViewer.clearTelemetryOverlay();
-
-            const toggle = this.element.querySelector('.__renderbox-telemetry-toggle');
-            if (toggle) toggle.classList.remove('active');
-
-            const typeSelect = this.element.querySelector('.__renderbox-telemetry-type');
-            if (typeSelect) typeSelect.classList.add('hidden');
-
-            const legend = this.element.querySelector('.__renderbox-telemetry-legend');
-            if (legend) legend.classList.add('hidden');
-        }
-    },
-
-    /**
-     * Toggle telemetry overlay on/off
-     */
-    _toggleTelemetry() {
-        const renderId = this.element.dataset.renderId;
-        if (!renderId) return;
-
-        const toggle = this.element.querySelector('.__renderbox-telemetry-toggle');
-        const typeSelect = this.element.querySelector('.__renderbox-telemetry-type');
-        const legend = this.element.querySelector('.__renderbox-telemetry-legend');
-
-        if (this._telemetryActive) {
-            // Turn off
-            this._telemetryActive = false;
-            sensorService.stopPolling();
-            ifcViewer.clearTelemetryOverlay();
-            if (toggle) toggle.classList.remove('active');
-            if (typeSelect) typeSelect.classList.add('hidden');
-            if (legend) legend.classList.add('hidden');
-            this._currentSensors = [];
-
-            // Notify details panel
-            document.dispatchEvent(new CustomEvent('telemetryToggled', { detail: { active: false } }));
-        } else {
-            // Turn on
-            this._telemetryActive = true;
-            if (toggle) toggle.classList.add('active');
-            if (typeSelect) { typeSelect.classList.remove('hidden'); typeSelect.value = 'all'; }
-            if (legend) legend.classList.remove('hidden');
-
-            sensorService.startPolling(renderId, (sensors) => {
-                this._currentSensors = sensors;
-                if (this._telemetryActive) {
-                    const filterType = typeSelect?.value || 'all';
-                    ifcViewer.applyTelemetryOverlay(sensors, filterType);
-                    this._updateLegend(filterType);
-
-                    // Notify details panel with sensor data
-                    document.dispatchEvent(new CustomEvent('telemetryToggled', {
-                        detail: { active: true, sensors }
-                    }));
-                }
-            });
-        }
-    },
-
-    /**
-     * Update legend labels based on selected sensor type
-     */
-    _updateLegend(filterType) {
-        const minLabel = this.element.querySelector('.__renderbox-legend-min');
-        const maxLabel = this.element.querySelector('.__renderbox-legend-max');
-        if (!minLabel || !maxLabel) return;
-
-        const ranges = {
-            TEMPERATURE:    { min: '18C', max: '26C' },
-            AIRFLOW:        { min: '0.5', max: '5.0 m/s' },
-            STRUCTURAL_LOAD:{ min: '50%', max: '95%' },
-            EQUIPMENT_STATUS: { min: 'OK', max: 'Fault' },
-            all:            { min: 'Low', max: 'High' }
-        };
-
-        const r = ranges[filterType] || ranges.all;
-        minLabel.textContent = r.min;
-        maxLabel.textContent = r.max;
-    }
 };
 
 export default renderbox;

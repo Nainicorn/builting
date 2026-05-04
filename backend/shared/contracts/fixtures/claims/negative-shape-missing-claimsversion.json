@@ -1,0 +1,24 @@
+{
+  "_category": "shape",
+  "_failureReason": "top-level claimsVersion is required; both Zod and Pydantic must reject when absent",
+  "domain": "TUNNEL",
+  "facilityMeta": {
+    "name": "Test Tunnel",
+    "type": "tunnel",
+    "description": null,
+    "units": "M",
+    "origin": { "x": 0, "y": 0, "z": 0 },
+    "axes": "RIGHT_HANDED_Z_UP"
+  },
+  "claims": [],
+  "sourceManifest": [],
+  "extractionReport": {
+    "totalClaims": 0,
+    "byKind": {},
+    "bySource": {},
+    "confidenceDistribution": { "high": 0, "medium": 0, "low": 0 },
+    "parseErrors": [],
+    "ambiguousClaims": 0,
+    "unresolvedClaims": 0
+  }
+}

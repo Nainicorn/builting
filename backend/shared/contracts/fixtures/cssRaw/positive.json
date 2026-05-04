@@ -1,0 +1,74 @@
+{
+  "_category": "positive",
+  "_description": "Minimal valid css_raw.json: one tunnel segment from a VSM source.",
+  "cssVersion": "1.0",
+  "domain": "TUNNEL",
+  "facility": {
+    "name": "Test Tunnel",
+    "type": "tunnel",
+    "description": "single segment for fixture testing",
+    "units": "M",
+    "crs": null,
+    "origin": { "x": 0, "y": 0, "z": 0 },
+    "axes": "RIGHT_HANDED_Z_UP"
+  },
+  "levelsOrSegments": [
+    {
+      "id": "seg-tunnel-main",
+      "type": "tunnel_segment_container",
+      "name": "Main Tunnel"
+    }
+  ],
+  "elements": [
+    {
+      "id": "el-1",
+      "element_key": "seg-1",
+      "type": "TUNNEL_SEGMENT",
+      "semanticType": "IfcBuildingElementProxy",
+      "name": "Branch_1",
+      "placement": {
+        "origin": { "x": 0, "y": 0, "z": 0 },
+        "axis": { "x": 0, "y": 0, "z": 1 },
+        "refDirection": { "x": 1, "y": 0, "z": 0 }
+      },
+      "geometry": {
+        "method": "EXTRUSION",
+        "profile": { "kind": "rectangle", "width": 5, "height": 4 },
+        "depth": 10
+      },
+      "container": "seg-tunnel-main",
+      "relationships": [],
+      "properties": {
+        "unique_no": 1,
+        "branchClass": "STRUCTURAL"
+      },
+      "material": {
+        "name": "concrete",
+        "color": [0.75, 0.75, 0.75],
+        "transparency": 0
+      },
+      "confidence": 0.95,
+      "source": "VSM"
+    }
+  ],
+  "metadata": {
+    "sourceFiles": [
+      {
+        "name": "tunnel.txt",
+        "parseStatus": "success",
+        "role": "geometry"
+      }
+    ],
+    "outputMode": "HYBRID",
+    "validationStatus": "PENDING",
+    "unitNormalizationApplied": true,
+    "cssHash": null,
+    "elementCounts": { "TUNNEL_SEGMENT": 1 },
+    "bbox": {
+      "min": { "x": 0, "y": 0, "z": 0 },
+      "max": { "x": 10, "y": 5, "z": 4 }
+    },
+    "repairLog": [],
+    "extractBuild": { "version": "1.0", "builtAt": "2026-05-01T00:00:00Z" }
+  }
+}

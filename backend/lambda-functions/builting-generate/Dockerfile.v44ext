@@ -1,0 +1,6 @@
+FROM 008368474482.dkr.ecr.us-gov-east-1.amazonaws.com/builting-json-to-ifc:v44
+
+COPY lambda_function.py /var/task/lambda_function.py
+COPY lambda_package/ /var/task/lambda_package/
+
+CMD ["lambda_function.handler"]

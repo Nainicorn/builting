@@ -2,17 +2,19 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, QueryCommand, PutCommand, UpdateCommand, DeleteCommand } from '@aws-sdk/lib-dynamodb';
 import { GetObjectCommand, S3Client, ListObjectsV2Command, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { SFNClient, StartExecutionCommand } from '@aws-sdk/client-sfn';
+import { LambdaClient, InvokeCommand } from '@aws-sdk/client-lambda';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 const dynamoClient = new DynamoDBClient({});
 const dynamo = DynamoDBDocumentClient.from(dynamoClient);
 const s3 = new S3Client({});
 const sfn = new SFNClient({});
+const lambdaClient = new LambdaClient({});
 
 const TableName = process.env.RENDERS_TABLE || 'builting-renders';
 const DATA_BUCKET = process.env.DATA_BUCKET || 'builting-data';
 const IFC_BUCKET = process.env.IFC_BUCKET || 'builting-ifc';
-const SENSORS_TABLE = process.env.SENSORS_TABLE || 'builting-sensors';
+const DIAGNOSTICS_LAMBDA = process.env.DIAGNOSTICS_LAMBDA_ARN || 'builting-diagnostics';
 
 const renders = {
   handle: async (event) => {
@@ -54,6 +56,12 @@ const renders = {
         return await renders.getVerificationReport(userId, renderId);
       }
 
+      // GET /api/renders/{renderId}/diagnostics - assemble and download diagnostics ZIP
+      if (method === 'GET' && path.includes('/diagnostics')) {
+        const renderId = path.split('/').slice(-2)[0];
+        return await renders.getDiagnosticsUrl(userId, renderId);
+      }
+
       // GET /api/renders/{renderId}/sources/{fileName} - download source file
       if (method === 'GET' && path.includes('/sources/')) {
         const parts = path.split('/');
@@ -61,26 +69,6 @@ const renders = {
         const renderId = parts[sourcesIdx - 1];
         const fileName = decodeURIComponent(parts[sourcesIdx + 1]);
         return await renders.getSourceFile(userId, renderId, fileName);
-      }
-
-      // POST /api/renders/{renderId}/sensors/refresh - refresh simulated sensor data
-      if (method === 'POST' && path.includes('/sensors/refresh')) {
-        const parts = path.split('/');
-        const sensorsIdx = parts.indexOf('sensors');
-        const renderId = parts[sensorsIdx - 1];
-        return await renders.refreshSensors(userId, renderId);
-      }
-
-      // GET /api/renders/{renderId}/sensors - list sensors (or get specific sensor)
-      if (method === 'GET' && path.includes('/sensors')) {
-        const parts = path.split('/');
-        const sensorsIdx = parts.indexOf('sensors');
-        const renderId = parts[sensorsIdx - 1];
-        const sensorId = parts[sensorsIdx + 1];
-        if (sensorId) {
-          return await renders.getSensor(userId, renderId, sensorId);
-        }
-        return await renders.listSensors(userId, renderId);
       }
 
       // GET /api/renders - list all renders for user
@@ -249,16 +237,48 @@ const renders = {
   },
 
   getVerificationReport: async (userId, renderId) => {
-    const key = `uploads/${userId}/${renderId}/reports/verification_report.json`;
-    try {
-      const response = await s3.send(new GetObjectCommand({ Bucket: DATA_BUCKET, Key: key }));
-      const buffer = await response.Body.transformToByteArray();
-      const reportJson = Buffer.from(buffer).toString('utf-8');
-      return { report: JSON.parse(reportJson) };
-    } catch (err) {
-      console.error('Error fetching verification report:', err.message);
-      return { error: 'Verification report not found', statusCode: 404 };
+    // Load verification report (if present) and pipeline trace files in parallel.
+    const reportKey = `uploads/${userId}/${renderId}/reports/verification_report.json`;
+    const tracePrefix = `${renderId}/pipeline_trace/`;
+
+    const [reportResult, traceResult] = await Promise.allSettled([
+      s3.send(new GetObjectCommand({ Bucket: DATA_BUCKET, Key: reportKey }))
+        .then(async r => {
+          const buf = await r.Body.transformToByteArray();
+          return JSON.parse(Buffer.from(buf).toString('utf-8'));
+        }),
+      // Trace files live in the IFC bucket at <renderId>/pipeline_trace/
+      s3.send(new ListObjectsV2Command({ Bucket: IFC_BUCKET, Prefix: tracePrefix }))
+        .then(async r => {
+          const files = r.Contents || [];
+          // Read each trace file (small JSON — always under 2KB)
+          const reads = files.map(f =>
+            s3.send(new GetObjectCommand({ Bucket: IFC_BUCKET, Key: f.Key }))
+              .then(async obj => {
+                const buf = await obj.Body.transformToByteArray();
+                return JSON.parse(Buffer.from(buf).toString('utf-8'));
+              })
+              .catch(() => null)
+          );
+          const entries = (await Promise.all(reads)).filter(Boolean);
+          // Sort by stage order then attemptN
+          const stageOrder = ['extract', 'resolve', 'topology', 'generate', 'store'];
+          entries.sort((a, b) => {
+            const si = stageOrder.indexOf(a.stage) - stageOrder.indexOf(b.stage);
+            return si !== 0 ? si : (a.attemptN || 0) - (b.attemptN || 0);
+          });
+          return entries;
+        }),
+    ]);
+
+    const report = reportResult.status === 'fulfilled' ? reportResult.value : null;
+    const traceEntries = traceResult.status === 'fulfilled' ? traceResult.value : [];
+
+    if (!report && traceEntries.length === 0) {
+      return { error: 'Report not found', statusCode: 404 };
     }
+
+    return { report, pipelineTrace: traceEntries };
   },
 
   finalizeRender: async (userId, renderId) => {
@@ -457,6 +477,34 @@ const renders = {
     return { renderId, message: 'Refinement pipeline started' };
   },
 
+  getDiagnosticsUrl: async (userId, renderId) => {
+    const render = await renders.getRender(userId, renderId);
+    if (render.error) return render;
+
+    const allowedStatuses = ['completed', 'failed', 'failed_contract'];
+    if (!allowedStatuses.includes(render.status)) {
+      return { error: `Diagnostics not available for renders with status: ${render.status}`, statusCode: 400 };
+    }
+
+    try {
+      const resp = await lambdaClient.send(new InvokeCommand({
+        FunctionName: DIAGNOSTICS_LAMBDA,
+        InvocationType: 'RequestResponse',
+        Payload: JSON.stringify({ userId, renderId }),
+      }));
+
+      const payload = JSON.parse(Buffer.from(resp.Payload).toString('utf-8'));
+      if (resp.FunctionError || payload.errorMessage || payload.error) {
+        console.error('Diagnostics lambda error:', payload);
+        return { error: 'Failed to assemble diagnostics bundle', statusCode: 500 };
+      }
+      return payload; // { downloadUrl }
+    } catch (err) {
+      console.error('Error invoking diagnostics lambda:', err);
+      return { error: 'Diagnostics service unavailable', statusCode: 503 };
+    }
+  },
+
   deleteRender: async (userId, renderId) => {
     console.log('Deleting render:', { userId, renderId });
 
@@ -465,6 +513,11 @@ const renders = {
       const render = await renders.getRender(userId, renderId);
       if (render.error) {
         return render; // Render not found
+      }
+
+      // Protect permanent demo renders — only deletable via backend/DynamoDB directly
+      if (render.is_demo_render) {
+        return { error: 'This render is permanent and cannot be deleted', statusCode: 403 };
       }
 
       // Delete source files from builting-data bucket
@@ -533,107 +586,5 @@ async function deleteS3Folder(bucket, prefix) {
 
   console.log(`Deleted all objects with prefix ${prefix} from ${bucket}`);
 }
-
-// ==================== Sensor Telemetry ====================
-
-const SENSOR_TYPES = {
-  TEMPERATURE:      { unit: 'C',   min: 18, max: 26, label: 'Temperature' },
-  AIRFLOW:          { unit: 'm/s', min: 0.5, max: 5.0, label: 'Airflow' },
-  EQUIPMENT_STATUS: { unit: null,  values: ['running', 'idle', 'fault'], label: 'Equipment Status' },
-  STRUCTURAL_LOAD:  { unit: '%',   min: 50, max: 95, label: 'Structural Load' },
-};
-
-/**
- * List all sensors for a render.
- */
-renders.listSensors = async function(userId, renderId) {
-  // Verify ownership
-  const render = await renders.getRender(userId, renderId);
-  if (render.error) return render;
-
-  const result = await dynamo.send(new QueryCommand({
-    TableName: SENSORS_TABLE,
-    KeyConditionExpression: 'render_id = :rid',
-    ExpressionAttributeValues: { ':rid': renderId }
-  }));
-
-  return { sensors: result.Items || [] };
-};
-
-/**
- * Get a single sensor by ID.
- */
-renders.getSensor = async function(userId, renderId, sensorId) {
-  const render = await renders.getRender(userId, renderId);
-  if (render.error) return render;
-
-  const result = await dynamo.send(new GetCommand({
-    TableName: SENSORS_TABLE,
-    Key: { render_id: renderId, sensor_id: sensorId }
-  }));
-
-  if (!result.Item) return { error: 'Sensor not found', statusCode: 404 };
-  return { sensor: result.Item };
-};
-
-/**
- * Refresh all sensors for a render with simulated value variations.
- */
-renders.refreshSensors = async function(userId, renderId) {
-  const render = await renders.getRender(userId, renderId);
-  if (render.error) return render;
-
-  const result = await dynamo.send(new QueryCommand({
-    TableName: SENSORS_TABLE,
-    KeyConditionExpression: 'render_id = :rid',
-    ExpressionAttributeValues: { ':rid': renderId }
-  }));
-
-  const sensors = result.Items || [];
-  if (sensors.length === 0) return { sensors: [], refreshed: 0 };
-
-  const now = Date.now();
-
-  for (const sensor of sensors) {
-    const config = SENSOR_TYPES[sensor.sensor_type];
-    if (!config) continue;
-
-    let newValue = sensor.current_value;
-    let newStatus = sensor.status;
-
-    if (config.values) {
-      const roll = Math.random();
-      if (roll < 0.01) { newValue = 'fault'; newStatus = 'critical'; }
-      else if (roll < 0.06) { newValue = 'idle'; newStatus = 'warning'; }
-      else if (roll < 0.10) { newValue = 'running'; newStatus = 'normal'; }
-    } else {
-      const range = config.max - config.min;
-      const drift = (Math.random() - 0.5) * range * 0.15;
-      newValue = Math.round(Math.max(config.min * 0.8, Math.min(config.max * 1.2, sensor.current_value + drift)) * 100) / 100;
-
-      const normalized = (newValue - config.min) / (config.max - config.min);
-      if (normalized > 1.0 || normalized < -0.1) newStatus = 'critical';
-      else if (normalized > 0.85 || normalized < 0.05) newStatus = 'warning';
-      else newStatus = 'normal';
-    }
-
-    await dynamo.send(new UpdateCommand({
-      TableName: SENSORS_TABLE,
-      Key: { render_id: renderId, sensor_id: sensor.sensor_id },
-      UpdateExpression: 'SET current_value = :v, #s = :st, last_updated = :t',
-      ExpressionAttributeNames: { '#s': 'status' },
-      ExpressionAttributeValues: { ':v': newValue, ':st': newStatus, ':t': now }
-    }));
-  }
-
-  // Re-query to return updated sensors
-  const updated = await dynamo.send(new QueryCommand({
-    TableName: SENSORS_TABLE,
-    KeyConditionExpression: 'render_id = :rid',
-    ExpressionAttributeValues: { ':rid': renderId }
-  }));
-
-  return { sensors: updated.Items || [], refreshed: sensors.length };
-};
 
 export default renders;

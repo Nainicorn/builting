@@ -1,0 +1,27 @@
+{
+  "_fixture": "no-spatial",
+  "_description": "Equipment list only (HVAC-001, PUMP-001, FAN-001, CHILL-001) — no geometry coordinates. Tests that the pipeline doesn't crash on inputs with no spatial data, stamps all elements it does produce, and never fabricates source filenames.",
+  "_last_verified": "2026-05-03",
+  "assertions": [
+    {
+      "name": "coverage_100pct",
+      "metric": "coverage_pct",
+      "op": "gte",
+      "value": 100,
+      "_comment": "All non-spatial elements produced must carry Pset_BuiltingProvenance."
+    },
+    {
+      "name": "model_not_empty",
+      "metric": "total_products",
+      "op": "gte",
+      "value": 1,
+      "_comment": "Pipeline must produce at least one non-spatial element — catches total-crash regressions."
+    },
+    {
+      "name": "no_fabricated_sources",
+      "metric": "no_fabricated_sources",
+      "allowed_source_patterns": [".vsm", ".dxf", ".txt", ".docx", ".csv", ".jpg", ".pdf"],
+      "_comment": "Key regression gate: if extract starts fabricating baselines from missing source data, a non-sentinel source file will appear here."
+    }
+  ]
+}

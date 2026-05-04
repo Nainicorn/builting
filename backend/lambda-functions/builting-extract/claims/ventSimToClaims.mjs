@@ -5,8 +5,8 @@
  */
 
 import {
-  buildClaim, buildEvidence, typeToKind, inferDiscipline,
-  CLAIM_KINDS, EXTRACTION_METHODS, COORDINATE_SOURCES, SOURCE_ROLES
+  buildClaim, buildEvidence, buildProvenance, typeToKind, inferDiscipline,
+  CLAIM_KINDS, EXTRACTION_METHODS, COORDINATE_SOURCES, SOURCE_ROLES, PROVENANCE_STATUS
 } from './claimsSchema.mjs';
 
 /**
@@ -24,6 +24,23 @@ export function ventSimCssToClaims(css, sourceFileName) {
     EXTRACTION_METHODS.VSM_PARSER,
     COORDINATE_SOURCES.DIRECT_3D
   );
+
+  function provFor(sf) {
+    const f = sf || null;
+    return buildProvenance(f, f ? PROVENANCE_STATUS.DIRECT : PROVENANCE_STATUS.MISSING, 'extract');
+  }
+
+  // GAP 9: Build node-ID → segment element_key index for DUCT-in-TUNNEL containment resolution
+  const nodeToSegment = {};
+  for (const el of (css.elements || [])) {
+    if (el.type === 'TUNNEL_SEGMENT') {
+      const en = el.properties?.entry_node;
+      const ex = el.properties?.exit_node;
+      const key = el.element_key || el.id;
+      if (en) nodeToSegment[en] = key;
+      if (ex) nodeToSegment[ex] = key;
+    }
+  }
 
   // Convert levelsOrSegments to level_definition claims
   for (const seg of (css.levelsOrSegments || [])) {
@@ -44,6 +61,7 @@ export function ventSimCssToClaims(css, sourceFileName) {
         confidence: 0.95,
         fieldConfidence: { dimensions: 0.95, placement: 0.95 },
         discipline: 'civil',
+        provenance: provFor(sourceFileName),
       }
     ));
   }
@@ -92,6 +110,20 @@ export function ventSimCssToClaims(css, sourceFileName) {
       metadata: el.metadata,
     };
 
+    // GAP 9: Resolve DUCT/PIPE/EQUIPMENT to host TUNNEL_SEGMENT via node map
+    const isMep = ['DUCT', 'PIPE', 'EQUIPMENT', 'DUCT_FITTING', 'FITTING_CANDIDATE'].includes(el.type);
+    if (isMep) {
+      const en = el.properties?.entry_node;
+      const ex = el.properties?.exit_node;
+      const hostKey = (en && nodeToSegment[en]) || (ex && nodeToSegment[ex]) || null;
+      if (hostKey) {
+        attributes.metadata = { ...attributes.metadata, hostSegmentId: hostKey };
+      }
+      if (el.metadata?.mountingZone) {
+        attributes.metadata = { ...attributes.metadata, mountingZone: el.metadata.mountingZone };
+      }
+    }
+
     // Collect aliases (VentSim branches can have named aliases)
     const aliases = [];
     if (el.properties?.unique_no !== undefined) {
@@ -111,6 +143,7 @@ export function ventSimCssToClaims(css, sourceFileName) {
         fieldConfidence,
         discipline: inferDiscipline(el.type, el.properties),
         aliases,
+        provenance: provFor(el.sourceFile || sourceFileName),
       }
     ));
   }

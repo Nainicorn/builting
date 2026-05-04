@@ -7,18 +7,16 @@
     gap: 8px;
     color: var(--accent);
     font-size: var(--font-size-sm);
-    font-weight: 400;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
+    font-weight: 500;
     padding: 8px 12px;
     transition: all var(--transition);
-    border-radius: 2px;
+    border-radius: var(--radius-md);
     width: 100%;
     font-family: var(--font-family);
 }
 
 .__controls-new:hover {
-    background: var(--accent-subtle);
+    background: rgba(124, 107, 189, 0.2);
     color: var(--accent-hover);
     border-color: var(--accent-hover);
 }

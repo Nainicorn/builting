@@ -1,0 +1,26 @@
+{
+  "_category": "shape",
+  "_failureReason": "Top-level envelope is closed (Zod .strict() / Pydantic extra='forbid'). Extra fields are catch the inverse drift: Zod allows extras by default, Pydantic rejects them; without explicit strict on Zod the validators would silently disagree.",
+  "claimsVersion": "1.0",
+  "domain": "TUNNEL",
+  "facilityMeta": {
+    "name": "Test Tunnel",
+    "type": "tunnel",
+    "description": null,
+    "units": "M",
+    "origin": { "x": 0, "y": 0, "z": 0 },
+    "axes": "RIGHT_HANDED_Z_UP"
+  },
+  "claims": [],
+  "sourceManifest": [],
+  "extractionReport": {
+    "totalClaims": 0,
+    "byKind": {},
+    "bySource": {},
+    "confidenceDistribution": { "high": 0, "medium": 0, "low": 0 },
+    "parseErrors": [],
+    "ambiguousClaims": 0,
+    "unresolvedClaims": 0
+  },
+  "unexpectedExtraField": "should be rejected by both validators"
+}

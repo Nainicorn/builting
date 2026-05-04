@@ -1,0 +1,13 @@
+{
+  "_category": "shape",
+  "_failureReason": "top-level schemaVersion is required",
+  "layer": "canonical_observed",
+  "domain": "TUNNEL",
+  "facility": null,
+  "observations": [],
+  "metadata": {
+    "claimsConsumed": 0,
+    "observationsProduced": 0,
+    "rejectedClaims": 0
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "_category": "shape",
+  "_failureReason": "geometry.method is a closed enum (EXTRUSION/SWEEP/MESH/BREP); 'EXTRUDE' (typo) must be rejected on both sides — catches Zod enum vs Pydantic Literal drift.",
+  "cssVersion": "1.0",
+  "domain": "BUILDING",
+  "facility": {
+    "name": "x", "type": "y", "description": "z",
+    "units": "M",
+    "origin": { "x": 0, "y": 0, "z": 0 },
+    "axes": "RIGHT_HANDED_Z_UP"
+  },
+  "levelsOrSegments": [],
+  "elements": [
+    {
+      "id": "wall-1",
+      "element_key": "wall-1",
+      "canonical_id": "canon-abc12345-def",
+      "type": "WALL",
+      "name": "Wall",
+      "placement": null,
+      "geometry": {
+        "method": "EXTRUDE",
+        "profile": null,
+        "depth": null
+      },
+      "container": null,
+      "relationships": [],
+      "properties": {},
+      "material": { "name": "x", "color": [0.5, 0.5, 0.5], "transparency": 0 },
+      "confidence": 0.85,
+      "source": "VSM",
+      "sourceFile": null,
+      "metadata": {}
+    }
+  ],
+  "topology": {
+    "nodes": [], "runs": [], "junctions": [], "interfaces": [], "hosts": [], "openings": []
+  },
+  "metadata": {
+    "modelExtent": { "x": 0, "y": 0, "z": 0, "elementCount": 1 },
+    "safetyWarnings": [],
+    "exportProfile": "coordination",
+    "outputMode": "HYBRID",
+    "placementZIsAbsolute": true,
+    "sourceFusion": null,
+    "interiorSuppression": null,
+    "tunnelDecomposition": null,
+    "repairLog": [],
+    "cssValidationIssues": 0,
+    "facilityDimensions": [],
+    "materialAssignments": [],
+    "adapterSource": "resolvedToLegacyCss",
+    "resolvedSchemaVersion": "2.0"
+  }
+}

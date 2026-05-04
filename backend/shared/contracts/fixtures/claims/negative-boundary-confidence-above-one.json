@@ -1,0 +1,42 @@
+{
+  "_category": "boundary",
+  "_failureReason": "claim.confidence is bounded to [0, 1]; 1.5 is just outside the valid range. Both validators must enforce identically (catches Zod min/max vs Pydantic ge/le drift).",
+  "claimsVersion": "1.0",
+  "domain": "TUNNEL",
+  "facilityMeta": {
+    "name": "Test Tunnel",
+    "type": "tunnel",
+    "description": null,
+    "units": "M",
+    "origin": { "x": 0, "y": 0, "z": 0 },
+    "axes": "RIGHT_HANDED_Z_UP"
+  },
+  "claims": [
+    {
+      "claim_id": "c-0001",
+      "kind": "wall_candidate",
+      "subject_local_id": "wall-1",
+      "attributes": {},
+      "status": "asserted",
+      "alternatives": [],
+      "requires_review": false,
+      "evidence": [],
+      "confidence": 1.5,
+      "fieldConfidence": {},
+      "aliases": [],
+      "source_revision_hint": null,
+      "discipline": "structural",
+      "parserVersion": "1.0"
+    }
+  ],
+  "sourceManifest": [],
+  "extractionReport": {
+    "totalClaims": 1,
+    "byKind": { "wall_candidate": 1 },
+    "bySource": {},
+    "confidenceDistribution": { "high": 1, "medium": 0, "low": 0 },
+    "parseErrors": [],
+    "ambiguousClaims": 0,
+    "unresolvedClaims": 0
+  }
+}

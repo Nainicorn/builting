@@ -1,3 +1,12 @@
+// Phase 13: Consumer + producer contract checks
+import { checkContractAsync, cssRawContract, validatedCssContract } from '@builting/contracts';
+// Phase 13 PR2: Trace writer
+import { writeTraceStart, writeTraceEnd } from '@builting/trace';
+// Phase 13.5 PR6: Audit log
+import { initAudit, flushAudit, logValidation } from '@builting/audit';
+// PR 8: Stage validators
+import { runTopologyValidators } from './validators/topology-validators.mjs';
+
 /**
  * Topology Engine Lambda (builting-topology-engine)
  *
@@ -32,7 +41,8 @@ import { S3Client, GetObjectCommand, PutObjectCommand, HeadObjectCommand } from 
 // ── Structure modules ──
 import { validateCSS, repairCSS, normalizeGeometry } from './validation.mjs';
 import {
-  decomposeTunnelShell, validateTunnelGeometry,
+  decomposeTunnelShell, buildCenterlineSkeleton, identifyAndMergeRuns,
+  validateTunnelGeometry,
   auditGeometryGaps, auditVisualGeometryQuality, auditOrphansAndBridgeGaps,
   generatePortalEndWalls
 } from './tunnel-shell.mjs';
@@ -44,18 +54,57 @@ import {
   clampAbsurdDimensions, clampWallsToEnvelope, snapWallEndpoints, alignSlabsToWalls,
   countAmbiguousProfiles, resetAmbiguousProfileCount, getAmbiguousProfileCount,
   deduplicateRoofs, deriveRoofElevation, snapSlabsToWallBases, snapWallsToStoreyFloor,
-  mergeShortTunnelSegments, validateSpaceContainment, inferSpaces
+  mergeShortTunnelSegments, validateSpaceContainment, inferSpaces,
+  synthesizeAncillaryRoomSlabs, snapSpecSlabsToLevels, synthesizeCoveringElements,
+  deduplicateOverlappingTunnelSegments, snapTunnelSegmentEndpoints,
+  solveJunctionPositions, trimSegmentsAtJunctions
 } from './building-envelope.mjs';
 
 // ── Geometry modules ──
 import { buildPathConnections } from './path-connections.mjs';
+import { synthesizeDuctFittings } from './duct-fittings.mjs';
 import { applyEquipmentMounting } from './equipment.mjs';
+import { buildDimensionLookup, applyTextDerivedHeights, applyDuctZDefaults, applyStoreyHeightFromProfile, synthesizePortalStoreys, normalizeDxfWallGeometry, applyPortalElevations, synthesizeVerticalShaft, synthesizeBuildingStoreys } from './dimension-apply.mjs';
 import { validateCSSElements, runSafetyChecks } from './safety.mjs';
 import { validateTopology } from './topology-validate.mjs';
 
 // ── Validation modules ──
 import { runFullValidation } from './model-validate.mjs';
 import { runRuleAssertions } from './rule-assertions.mjs';
+
+// ── Engineer-intent resolver (Phase 6 — see PLAN.md) ──
+import { inferEngineerIntent } from './intent-resolver.mjs';
+import { reconcileElementEvidence } from './evidence-reconciler.mjs';
+import { INTENT_RESOLVER_MODES } from './config.mjs';
+
+// ── Phase 6A.5 — Space classification (planning-only, no element mutation) ──
+import { classifySpacesAndPlanDoors } from './space-classifier.mjs';
+
+// ── Phase 6A.5 — Plan-driven acceptance override (mutates reconciliationStatus) ──
+import { applyPlanDrivenAcceptance } from './acceptance-override.mjs';
+
+// ── Phase 6B — Wall and Portal Structure Reconstruction (planning-only) ──
+import { reconstructWalls } from './wall-reconstructor.mjs';
+
+// ── Phase 6C — Connectivity gap diagnostics (planning-only, no element mutation) ──
+import { buildConnectivityGapReport } from './connectivity-gap-report.mjs';
+import {
+  applyShellConnectivityFixes,
+  applyVentilationFixes,
+  addPortalDoorDiagnostics
+} from './connectivity-fixes.mjs';
+
+// ── Phase 8 — Spatial Placement Engine (universal positioning intelligence) ──
+import { applySpatialPlacement } from './spatial-placement.mjs';
+
+// ── Phase 9 — Tunnel-Anchored Spatial Layout (refinement layer) ──
+import { applyTunnelAnchoredLayout } from './tunnel-anchored-layout.mjs';
+
+// ── Phase 10 — Source Coordinate Normalization (frame alignment, runs first) ──
+import { applyCoordinateNormalization } from './coordinate-normalize.mjs';
+
+// ── Phase 11 — Structural Integration (boolean-cut descriptors) ──
+import { applyStructuralIntegration } from './structural-integration.mjs';
 
 // ── v2 Adapters ──
 import { cssToInferred, cssToResolved, resolvedToLegacyCss } from './v2-adapter.mjs';
@@ -407,11 +456,15 @@ function _validatePathPoints(points, maxPoints) {
   return filtered;
 }
 
-export const handler = async (event) => {
+export const handler = async (event, context) => {
   console.log('TopologyEngine Lambda invoked — unified structure + geometry + validate');
   resetAmbiguousProfileCount();
   const startTime = Date.now();
   const stepTimings = [];
+  // Phase 13 PR2: Trace state — populated after idempotency guard.
+  const _traceRunId = context?.awsRequestId || `topology-${Date.now()}`;
+  const _traceStartedAt = new Date().toISOString();
+  let _traceKey = null; let _traceAttemptN = 1;
 
   // The CSS object is passed by reference through ALL stages — no serialization.
   let css;
@@ -449,6 +502,13 @@ export const handler = async (event) => {
   if (!css || !css.elements) {
     throw new Error('CSS loaded from S3 has no elements');
   }
+
+  // Consumer contract check: validate css_raw.json on entry (halting).
+  await checkContractAsync('cssRawContract', cssRawContract, css, {
+    halting: true,
+    renderId,
+    stage: 'topology-entry',
+  });
 
   // Idempotency: if output artifacts already exist, return cached result
   const _processedKey = `uploads/${userId}/${renderId}/css/css_processed.json`;
@@ -488,12 +548,56 @@ export const handler = async (event) => {
     if (err.name !== 'NotFound' && err.$metadata?.httpStatusCode !== 404) throw err;
   }
 
+  // Phase 13 PR2: Trace start — after idempotency/cache guard.
+  try {
+    ({ key: _traceKey, attemptN: _traceAttemptN } = await writeTraceStart({
+      renderId, stage: 'topology', runId: _traceRunId, startedAt: _traceStartedAt,
+      artifactKey: cssS3Key,
+    }));
+  } catch (te) { console.warn('[trace] start write failed (non-fatal):', te.message); }
+  initAudit(renderId, 'topology', _traceRunId);
+
   const elementCountIn = css.elements.length;
   const domain = (css.domain || '').toUpperCase();
   // Data-driven: pipeline branching is determined by element types, not the domain string.
   // This correctly handles hybrid structures and cases where domain is missing or wrong.
   const hasTunnelSegs = css.elements.some(e => e.type === 'TUNNEL_SEGMENT');
   console.log(`TopologyEngine: domain=${domain}, hasTunnelSegs=${hasTunnelSegs}, elementCount=${elementCountIn}`);
+  if (hasTunnelSegs && !css.metadata?.facilityDimensions?.length) {
+    console.warn('TopologyEngine: WARN hasTunnelSegs=true but css.metadata.facilityDimensions is absent or empty — dist patch may be missing from extract lambda or DOCX was not present');
+  } else if (hasTunnelSegs) {
+    console.log(`TopologyEngine: facilityDimensions present — ${css.metadata.facilityDimensions.length} entries, sources=[${[...new Set(css.metadata.facilityDimensions.map(d => d._source || 'unknown'))].join(',')}]`);
+  }
+  // Portal elevation diagnostic
+  if (hasTunnelSegs) {
+    const portalCount = (css.metadata?.portals || []).length;
+    const portalElevs = (css.metadata?.portals || []).filter(p => p.elevation_msl != null);
+    console.log(`TopologyEngine: metadata.portals=${portalCount} (${portalElevs.length} with elevation_msl)${portalElevs.length > 0 ? ' → ' + portalElevs.map(p => `${p.name}=${p.elevation_msl}m`).join(', ') : ''}`);
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // PHASE 1.5: PROVENANCE INITIALIZATION
+  // Stamp every element that arrives without a provenance field so that
+  // modification-tracking guards (topology:snap, topology:inferOpenings, etc.)
+  // have an object to append to. Must run before any structural pass.
+  // ════════════════════════════════════════════════════════════════════════
+  let provenanceInitCount = 0;
+  for (const elem of css.elements) {
+    if (!elem.provenance) {
+      const sf = elem.sourceFile || null;
+      elem.provenance = {
+        sourceFile: sf,
+        sourceFileStatus: sf ? 'direct' : 'missing',
+        sourceFiles: sf ? [sf] : [],
+        stage: 'topology:init',
+        modifications: [],
+      };
+      provenanceInitCount++;
+    }
+  }
+  if (provenanceInitCount > 0) {
+    console.log(`ProvenanceInit: stamped ${provenanceInitCount} elements with baseline provenance`);
+  }
 
   // ════════════════════════════════════════════════════════════════════════
   // PHASE 2: STRUCTURE RESOLVE (formerly builting-structure)
@@ -510,16 +614,40 @@ export const handler = async (event) => {
     console.log(`Repair complete: ${css.metadata.repairLog?.length || 0} repairs applied`);
   }
 
+  // Step 2.5: Phase 10 — Source Coordinate Normalization.
+  // Detects per-source coordinate frames (VSM, DXF, SPEC_TEXT, …), picks
+  // the VSM tunnel frame as canonical, and translates non-canonical
+  // elements so every downstream pass operates on a single project frame.
+  // SPACEs that still carry a default origin after the transform are
+  // tagged NEEDS_COORDINATE_RESOLUTION + FLOATING (placement.origin=null)
+  // so they're never emitted as geometry.  Runs BEFORE normalizeGeometry
+  // so origin-shift / clamping doesn't run against a frame mismatch.
+  if (css.featureFlags?.PHASE_10_NORMALIZE !== false) {
+    timedStep('applyCoordinateNormalization', () => applyCoordinateNormalization(css));
+  }
+
   // Step 3: Normalize geometry (origin shift, coordinate clamping)
   timedStep('normalizeGeometry', () => normalizeGeometry(css));
 
   // Step 3B: Tunnel semantic pipeline (runs when TUNNEL_SEGMENT elements are present)
   // Topology defines structure — generate creates geometry.
-  // decomposeTunnelShell now annotates segments with shell metadata (profile, thickness, path)
-  // instead of emitting geometry fragments. Shell-fragment steps are disabled.
+  // decomposeTunnelShell annotates segments with shell metadata (thickness, path).
+  // Shell rendering: applyTextDerivedHeights (Step G1.5) sets profile.type='ARCH' for horseshoe
+  // tunnels; the generate lambda renders each TUNNEL_SEGMENT as a single hollow arch tube.
+  // decomposeMergedRuns (4-panel shell decomposition) is NOT called — it creates LEFT_WALL/
+  // RIGHT_WALL/FLOOR/ROOF shell pieces that duplicate the arch tube geometry, causing 3× element
+  // inflation. Arch tube rendering (already working for all structural segments) replaces it.
   if (hasTunnelSegs) {
-    console.log('Tunnel segments detected: semantic annotation pipeline (no shell fragment emission)');
+    console.log('Tunnel segments detected: arch hollow tube pipeline');
+    // Junction solver BEFORE shell annotation — so shellThickness uses junction-solved positions.
+    timedStep('solveJunctionPositions', () => solveJunctionPositions(css));
     timedStep('decomposeTunnelShell', () => decomposeTunnelShell(css));
+    // Dedup BEFORE skeleton — duplicate segments produce doubled geometry
+    timedStep('earlyDedup', () => deduplicateOverlappingTunnelSegments(css));
+    // Build skeleton and runs for audit/path-connection reference (no shell pieces emitted).
+    timedStep('buildCenterlineSkeleton', () => buildCenterlineSkeleton(css));
+    timedStep('identifyAndMergeRuns', () => identifyAndMergeRuns(css));
+    // decomposeMergedRuns intentionally skipped — arch tube rendering handles structural geometry.
     timedStep('generatePortalEndWalls', () => generatePortalEndWalls(css));
     // mergeShortTunnelSegments operates on segments, not fragments — keep it
     timedStep('mergeShortTunnelSegments', () => mergeShortTunnelSegments(css));
@@ -540,6 +668,26 @@ export const handler = async (event) => {
 
   // Step 3C: Snap wall endpoints (tiered: 50mm → 150mm)
   timedStep('snapWallEndpoints', () => snapWallEndpoints(css));
+
+  // Step 3C-T: Snap tunnel segment endpoints (tiered: 50mm → 150mm)
+  // snapWallEndpoints skips tunnels, so this dedicated pass handles TUNNEL_SEGMENT alignment.
+  // Runs BEFORE bridgeVSMNodes so bridges are only created for real gaps, not snap-fixable ones.
+  if (hasTunnelSegs) {
+    timedStep('snapTunnelSegmentEndpoints', () => snapTunnelSegmentEndpoints(css));
+
+    // Step 3C-T2 (Phase 6D.1 P2): trim segment ends at multi-way junctions so
+    // CSG filler hulls (in the generate lambda) replace local shell instead of
+    // sitting on top of it. Trim radius defaults to 0.5m; tune via the
+    // TUNNEL_JUNCTION_TRIM_M env var. Set to 0 to disable.
+    const trimRadiusRaw = process.env.TUNNEL_JUNCTION_TRIM_M;
+    const trimRadiusM = trimRadiusRaw == null
+      ? 0.5
+      : Number.parseFloat(trimRadiusRaw);
+    if (Number.isFinite(trimRadiusM) && trimRadiusM > 0) {
+      timedStep('trimSegmentsAtJunctions',
+        () => trimSegmentsAtJunctions(css, trimRadiusM));
+    }
+  }
 
   // Step 3D: Bridge VSM node coordinate gaps (tunnel structures only).
   // Inserts TUNNEL_SEGMENT bridge elements between topologically connected branches
@@ -563,6 +711,110 @@ export const handler = async (event) => {
   // Step 4C: Rebuild topology after merge (building structures — no TUNNEL_SEGMENT elements)
   if (!hasTunnelSegs) {
     timedStep('buildTopologyGraph', () => buildTopologyGraph(css));
+  }
+
+  // Step 4C-R: Evidence Reconciliation — runs before the intent resolver so
+  // the resolver only processes authoritative door candidates.  Compares raw
+  // extracted door/window elements against the authoritative spec constraints
+  // (count, types, sizes) and marks excess/weak candidates as 'rejected'.
+  // Rejected elements are stripped from css_processed.json in the
+  // preGenerateExportValidation pass so they never reach the generate lambda.
+  timedStep('reconcileElementEvidence', () => { reconcileElementEvidence(css); });
+
+  // Step 4D: Engineer-intent resolver (Phase 6) — runs after topology graph
+  // is stable so door host candidates (TUNNEL_SEGMENT, PORTAL_END_WALL, WALL)
+  // are settled. In Phase 6A (mode='report') this is observation-only:
+  // the resolver computes what an engineer would have meant for each door
+  // and writes engineer_intent_report.json, but does NOT annotate elements.
+  // Modes 'consume-doors' and beyond switch on per-element annotation in 6B+.
+  // Phase 6C — default to consume-doors so the plan-driven acceptance
+  // override actually drops MAIN_TUNNEL / ROOM_INTERIOR doors and surfaces
+  // unresolved main-portal entrances. The space-classifier + override stack
+  // (Phase 6A.5) is the source of truth for door placement; leaving the
+  // default at 'report' silently let mis-zoned doors through to generate.
+  const intentMode = (() => {
+    const raw = (process.env.INTENT_RESOLVER_MODE || 'consume-doors').toLowerCase();
+    return INTENT_RESOLVER_MODES.includes(raw) ? raw : 'consume-doors';
+  })();
+  css.metadata = css.metadata || {};
+  css.metadata.featureFlags = css.metadata.featureFlags || {};
+  css.metadata.featureFlags.intentMode = intentMode;
+  let intentReport = null;
+  if (intentMode !== 'off') {
+    timedStep('inferEngineerIntent', () => {
+      intentReport = inferEngineerIntent(css, { phase: 'structural', mode: intentMode });
+    });
+  }
+
+  // Step 4E: Phase 6A.5 — Space classification + semantic door plan.
+  // Planning-only pass: classifies tunnel segments/nodes into functional zones,
+  // derives rooms, applies architectural door rules, and emits a diff against
+  // the current intent/reconciliation selection. Does NOT mutate elements.
+  let spaceReport = null;
+  let doorPlan    = null;
+  timedStep('classifySpacesAndPlanDoors', () => {
+    const result = classifySpacesAndPlanDoors(css);
+    spaceReport = result.spaceReport;
+    doorPlan    = result.doorPlan;
+  });
+  if (spaceReport && doorPlan) {
+    console.log(`SpaceClassifier: segments=${spaceReport.counts.segments} ` +
+                `rooms=${spaceReport.counts.rooms} ` +
+                `mainCorridor=${spaceReport.counts.mainCorridorSegments} ` +
+                `junctions=${spaceReport.counts.junctionNodes} ` +
+                `shafts=${spaceReport.counts.shaftElements}`);
+    console.log(`DoorPlan: candidates=${doorPlan.summary.totalCandidates} ` +
+                `currentAccepted=${doorPlan.summary.currentAccepted} ` +
+                `expectedTotal=${doorPlan.summary.expectedTotal} ` +
+                `deviations=${doorPlan.deviations.length}`);
+  }
+
+  // Step 4F: Phase 6A.5 — Plan-driven acceptance override.
+  // Reads spaceReport + doorPlan, mutates each DOOR element's
+  // reconciliationStatus + intent.skipReason per architectural rules.
+  // Only activates when intent mode is consume-doors (or stronger) — under
+  // 'report' mode the classifier still runs but acceptance is left untouched.
+  let overrideReport = null;
+  if (spaceReport && doorPlan
+      && (intentMode === 'consume-doors' || intentMode === 'consume-mep' || intentMode === 'consume-all')) {
+    timedStep('applyPlanDrivenAcceptance', () => {
+      overrideReport = applyPlanDrivenAcceptance(css, spaceReport, doorPlan);
+    });
+    if (overrideReport) {
+      console.log(`AcceptanceOverride: ` +
+                  `pre=${overrideReport.summary.preAccepted}→post=${overrideReport.summary.postAccepted} accepted, ` +
+                  `emittable=${overrideReport.summary.postEmittable}, ` +
+                  `acceptedNoHost=${overrideReport.summary.postAcceptedNoHost}, ` +
+                  `portalReanchored=${overrideReport.summary.portalReanchored || 0}, ` +
+                  `decisions=${overrideReport.summary.decisions}, ` +
+                  `unresolved=${overrideReport.summary.unresolved}`);
+      // Attach to the existing evidence reconciliation report so it persists
+      // through to S3 alongside the original reconciler audit.
+      css.metadata = css.metadata || {};
+      css.metadata.evidenceReconciliation = css.metadata.evidenceReconciliation || {};
+      css.metadata.evidenceReconciliation.planDrivenOverride = overrideReport;
+    }
+  }
+
+  // Step 4G: Phase 6B — Wall and Portal Structure Reconstruction (planning-only).
+  // Derives planar portal entrance walls (per mainPortalPair) and room
+  // partition walls (where rooms branch off the corridor at junction nodes)
+  // and writes the plans into css.metadata.wallReconstruction. The Python
+  // generate lambda consumes the plans and emits IfcWallStandardCase. Does
+  // NOT mutate elements, doors, the reconciler, or intent metadata.
+  let wallReconReport = null;
+  if (spaceReport) {
+    timedStep('reconstructWalls', () => {
+      wallReconReport = reconstructWalls(css, spaceReport);
+    });
+    if (wallReconReport) {
+      const s = wallReconReport.summary || {};
+      console.log(`WallReconstructor: portalWalls=${s.portalWalls} ` +
+                  `junctionWalls=${s.junctionWalls ?? '-'} ` +
+                  `terminalWalls=${s.terminalWalls ?? '-'} ` +
+                  `roomPartitionWalls=${s.roomPartitionWalls} ` +
+                  `total=${s.totalWalls} expected=${s.expectedTotal ?? '-'}`);
+    }
   }
 
   // Step 5: Infer openings
@@ -635,41 +887,109 @@ export const handler = async (event) => {
 
   console.log('GeometryBuild phase — topology graph in memory, no S3 round-trip');
 
-  // Step G0.5: Deduplicate overlapping tunnel segments (same entry+exit nodes, same direction)
+  // Step G0.5: Deduplicate overlapping structural tunnel segments
+  // Handles: exact node matches, reversed-node pairs, and spatial proximity overlaps.
   if (hasTunnelSegs) {
-    timedStep('deduplicateOverlappingSegments', () => {
-      const seen = new Map();
-      let removed = 0;
-      css.elements = css.elements.filter(e => {
-        if (e.type !== 'TUNNEL_SEGMENT') return true;
-        const en = e.properties?.entry_node || '';
-        const ex = e.properties?.exit_node || '';
-        if (!en || !ex) return true;
-        const pairKey = `${en}→${ex}`;
-        if (seen.has(pairKey)) {
-          // Keep the one with larger profile area
-          const existing = seen.get(pairKey);
-          const existingArea = (existing.geometry?.profile?.width || 0) * (existing.geometry?.profile?.height || 0);
-          const thisArea = (e.geometry?.profile?.width || 0) * (e.geometry?.profile?.height || 0);
-          if (thisArea > existingArea) {
-            seen.set(pairKey, e);
-            return true; // keep this, will filter existing later
-          }
-          removed++;
-          return false;
-        }
-        seen.set(pairKey, e);
-        return true;
-      });
-      if (removed > 0) console.log(`deduplicateOverlappingSegments: removed ${removed} duplicate segments`);
-    });
+    timedStep('deduplicateOverlappingTunnelSegments', () => deduplicateOverlappingTunnelSegments(css));
+  }
+
+  // Step G0.6: Rebuild topology graph after dedup so runs reference surviving segments only.
+  // Without this, buildPathConnections creates connections to removed elements
+  // that fail IFC resolution in generate (no IFC entity for deduplicated segments).
+  if (hasTunnelSegs && (css.metadata?.overlappingSegmentsRemoved || 0) > 0) {
+    timedStep('rebuildTopologyPostDedup', () => buildTopologyGraph(css));
   }
 
   // Step G1: Build path connections (uses topology by reference)
   timedStep('buildPathConnections', () => buildPathConnections(css));
 
+  // Step G1.1: Synthesize DUCT_FITTING elements at duct junction nodes
+  timedStep('synthesizeDuctFittings', () => synthesizeDuctFittings(css));
+
+  // Step G1.5: Apply text-derived facility dimensions (DOCX/structured extraction → element geometry)
+  // Runs before equipment mounting so corrected tunnel bore dimensions propagate into Z placement.
+  if (css.metadata?.facilityDimensions?.length > 0) {
+    const dimLookup = buildDimensionLookup(css.metadata.facilityDimensions);
+    timedStep('applyTextDerivedHeights',     () => applyTextDerivedHeights(css, dimLookup));
+    timedStep('normalizeDxfWallGeometry',    () => normalizeDxfWallGeometry(css, dimLookup));
+    timedStep('applyDuctZDefaults',          () => applyDuctZDefaults(css, dimLookup));
+    // Backfill height_m onto tunnel levelsOrSegments so storey_height_map in the
+    // generate lambda gets a real bore height for DXF wall extrusion (not the 3.5m default).
+    timedStep('applyStoreyHeightFromProfile', () => applyStoreyHeightFromProfile(css, dimLookup));
+    // Step G1.5b: Synthesize vertical shaft from SHAFT facilityDimension (tunnel only).
+    if (hasTunnelSegs) {
+      timedStep('synthesizeVerticalShaft', () => synthesizeVerticalShaft(css, dimLookup));
+    }
+  }
+
+  // Step G1.6: Synthesize Portal_Roof storey for portal-building walls (tunnel only).
+  // Runs after splitTunnelSubSegments has created seg-*-upper and after
+  // generatePortalEndWalls has emitted PORTAL_BUILDING elements.
+  if (hasTunnelSegs) {
+    timedStep('synthesizePortalStoreys', () => synthesizePortalStoreys(css));
+  }
+
+  // Step G1.7: Apply portal elevation grade (tunnel only).
+  // Reads css.metadata.portals (from DOCX extraction) and interpolates Z along
+  // the tunnel path so segments between portals reflect the real-world grade.
+  // Must run BEFORE equipment mounting (Z placement depends on host segment Z).
+  if (hasTunnelSegs) {
+    timedStep('applyPortalElevations', () => applyPortalElevations(css));
+  }
+
+  // Step G1.8: Synthesize STOREY-type levelsOrSegments from portal elevations (tunnel only).
+  // Creates separate IfcBuildingStorey entries for portal buildings at distinct MSL elevations.
+  // Must run AFTER applyPortalElevations (Z values set) and generatePortalEndWalls.
+  if (hasTunnelSegs) {
+    timedStep('synthesizeBuildingStoreys', () => synthesizeBuildingStoreys(css));
+  }
+
+  // Step G1.9: Synthesize floor+roof slabs for ancillary rooms (portal buildings, crosscuts).
+  // Must run AFTER synthesizeBuildingStoreys — portal walls are not in storey containers until
+  // that step reassigns them. Running earlier causes all portal walls to be seen in structural
+  // containers (tunnel segment containers) and skipped, producing 0 slabs.
+  if (hasTunnelSegs) {
+    timedStep('snapSpecSlabsToLevels', () => snapSpecSlabsToLevels(css));
+    timedStep('synthesizeAncillaryRoomSlabs', () => synthesizeAncillaryRoomSlabs(css));
+    // Step G1.10: Synthesize ceiling coverings (IfcCovering) for the same rooms that got slabs.
+    // Must run after synthesizeAncillaryRoomSlabs so the roof slabs it uses as anchors exist.
+    timedStep('synthesizeCoveringElements', () => synthesizeCoveringElements(css));
+  }
+
   // Step G2: Equipment mounting
   timedStep('applyEquipmentMounting', () => applyEquipmentMounting(css));
+
+  // Step G2.4: Phase 8 — Spatial Placement Engine.
+  // Universal positioning pass: SPACE bbox inference from connected
+  // tunnel-segment clusters, slab/covering placement against SPACE bounds,
+  // wall snapping to tunnel centerlines, door host-wall binding, shaft
+  // junction snap.  Runs after equipment mounting (which already places
+  // EQUIPMENT origins) and before classify/annotate so downstream geometry
+  // sees corrected placements.
+  if (css.featureFlags?.PHASE_8_SPATIAL !== false) {
+    timedStep('applySpatialPlacement', () => applySpatialPlacement(css));
+  }
+
+  // Step G2.4b: Phase 9 — Tunnel-Anchored Spatial Layout.
+  // Layout correction pass that runs AFTER Phase 8: snaps SPACEs to the
+  // primary tunnel network, builds 4-wall enclosures around each SPACE,
+  // realigns doors to sit at the SPACE↔tunnel midpoint with a tunnel-shell
+  // cut flag, snaps the shaft strictly to a junction with a ceiling-cut
+  // flag, and tags floating elements for emit-skip.
+  if (css.featureFlags?.PHASE_9_LAYOUT !== false) {
+    timedStep('applyTunnelAnchoredLayout', () => applyTunnelAnchoredLayout(css));
+  }
+
+  // Step G2.4c: Phase 11 — Structural Integration (boolean cuts).
+  // Runs AFTER Phase 9 layout: stamps tunnelOpening descriptors on every
+  // attached SPACE, verifies door/wall/tunnel intersection (rejecting doors
+  // that do not), forces shaft penetration of the tunnel crown, removes
+  // walls that sit inside the tunnel volume, and tags any unintegrated
+  // SPACE for emit-skip.  Generate consumes the descriptors to perform
+  // real IfcOpeningElement / IfcRelVoidsElement boolean subtractions.
+  if (css.featureFlags?.PHASE_11_INTEGRATION !== false) {
+    timedStep('applyStructuralIntegration', () => applyStructuralIntegration(css));
+  }
 
   // Step G2.5: Classify geometry behavior (universal geometry contract)
   timedStep('classifyGeometryBehavior', () => classifyGeometryBehavior(css));
@@ -767,6 +1087,7 @@ export const handler = async (event) => {
     let strippedLinearPath = 0;
     let strippedDuplicateFloor = 0;
     let strippedBadPlacement = 0;
+    let strippedReconcilerRejected = 0;
     const LINEAR_MEP_TYPES = new Set(['IfcPipeSegment', 'IfcDuctSegment', 'IfcCableCarrierSegment']);
 
     // Track floor slabs per container for duplicate detection
@@ -779,6 +1100,16 @@ export const handler = async (event) => {
       const props = elem.properties || {};
       const meta = elem.metadata || {};
       const geom = elem.geometry || {};
+
+      // ── Gate A-R: Reconciler-rejected doors — strip before generate ──
+      // Evidence reconciliation (Step 4C-R) marked excess/weak candidates as
+      // 'rejected'. They are preserved in css_structure.json for debugging but
+      // must not appear in css_processed.json or the final IFC.
+      if ((type === 'DOOR' || type === 'WINDOW') &&
+          meta.reconciliationStatus === 'rejected') {
+        strippedReconcilerRejected++;
+        continue;
+      }
 
       // ── Gate A: Host/container/relationship target validity ──
       // Elements with host refs that don't resolve → strip
@@ -918,18 +1249,101 @@ export const handler = async (event) => {
 
     css.elements = keep;
 
-    const totalStripped = strippedHostRef + strippedLinearPath + strippedDuplicateFloor + strippedBadPlacement;
+    const totalStripped = strippedHostRef + strippedLinearPath + strippedDuplicateFloor + strippedBadPlacement + strippedReconcilerRejected;
     if (totalStripped > 0) {
-      console.log(`preGenerateExportValidation: stripped ${totalStripped} elements (hostRef=${strippedHostRef}, linearPath=${strippedLinearPath}, duplicateFloor=${strippedDuplicateFloor}, badPlacement=${strippedBadPlacement})`);
+      console.log(
+        `preGenerateExportValidation: stripped ${totalStripped} elements ` +
+        `(reconcilerRejected=${strippedReconcilerRejected}, hostRef=${strippedHostRef}, ` +
+        `linearPath=${strippedLinearPath}, duplicateFloor=${strippedDuplicateFloor}, badPlacement=${strippedBadPlacement})`
+      );
     } else {
       console.log('preGenerateExportValidation: all elements passed');
     }
 
     if (!css.metadata) css.metadata = {};
     css.metadata.preGenerateValidation = {
-      strippedHostRef, strippedLinearPath, strippedDuplicateFloor, strippedBadPlacement, totalStripped
+      strippedReconcilerRejected, strippedHostRef, strippedLinearPath,
+      strippedDuplicateFloor, strippedBadPlacement, totalStripped
     };
   });
+
+  // ════════════════════════════════════════════════════════════════════════
+  // PHASE 6C: CONNECTIVITY GAP DIAGNOSTICS + REPORT-DRIVEN FIXES
+  //
+  // Two-pass model:
+  //   1. Build the gap report (initial) so fixes have a deterministic,
+  //      audited input list.
+  //   2. Apply Fix 1 (shell snap+bridges), Fix 2 (vent class+stitch), and
+  //      Fix 4 (portal door diagnostics, no element creation).
+  //   3. Re-synthesise duct fittings against the now-corrected duct paths.
+  //   4. Re-build the gap report — this is the version written to S3.
+  // ════════════════════════════════════════════════════════════════════════
+
+  let connectivityGapReport = null;
+  let connectivityGapReportInitial = null;
+  let connectivityFixActions = null;
+
+  timedStep('buildConnectivityGapReport_initial', () => {
+    connectivityGapReportInitial = buildConnectivityGapReport(
+      css, spaceReport, doorPlan, wallReconReport
+    );
+  });
+  if (connectivityGapReportInitial) {
+    const f = connectivityGapReportInitial.findings || {};
+    console.log(`ConnectivityGapReport[initial]: shell_gaps=${f.shell_gaps} ` +
+                `rooms_disconnected=${f.rooms_disconnected} ` +
+                `incomplete_closure=${f.rooms_incomplete_closure} ` +
+                `door_flags=${f.door_flags} ` +
+                `vent_missing_fittings=${f.ventilation_missing_fittings} ` +
+                `vent_floating=${f.ventilation_floating} ` +
+                `vent_wrong_class=${f.ventilation_wrong_class} ` +
+                `equipment_missing=${f.equipment_missing} ` +
+                `portal_elev_mismatch=${f.portal_elevation_mismatch}`);
+  }
+
+  // Fix 1: shell connectivity (snap < 1m, bridge 1–6m).
+  timedStep('applyShellConnectivityFixes', () => {
+    const out = applyShellConnectivityFixes(css, connectivityGapReportInitial);
+    connectivityFixActions = { ...(connectivityFixActions || {}), shell: out };
+    console.log(`[6C] shell_fixes snapped=${out.snapped.length} bridged=${out.bridged.length} skipped=${out.skipped.length}`);
+  });
+
+  // Fix 2: ventilation class correction + endpoint stitching.
+  timedStep('applyVentilationFixes', () => {
+    const out = applyVentilationFixes(css, connectivityGapReportInitial);
+    connectivityFixActions = { ...(connectivityFixActions || {}), ventilation: out };
+    console.log(`[6C] vent_fixes classCorrected=${out.classCorrected.length} stitched=${out.stitched.length}`);
+  });
+
+  // Re-synthesise duct fittings: the stitching may have created/changed
+  // junction nodes. synthesizeDuctFittings is idempotent on the network.
+  if (hasTunnelSegs) {
+    timedStep('synthesizeDuctFittings_post6C', () => synthesizeDuctFittings(css));
+  }
+
+  // Fix 4: portal door candidate diagnostic (no creation, just logging).
+  timedStep('addPortalDoorDiagnostics', () => {
+    const out = addPortalDoorDiagnostics(css, connectivityGapReportInitial, spaceReport);
+    connectivityFixActions = { ...(connectivityFixActions || {}), portalDoors: out };
+  });
+
+  // Final report — reflects post-fix state. This is the artefact written to S3.
+  timedStep('buildConnectivityGapReport_final', () => {
+    connectivityGapReport = buildConnectivityGapReport(
+      css, spaceReport, doorPlan, wallReconReport
+    );
+    if (connectivityGapReport) {
+      connectivityGapReport.fixActionsAppliedThisRun = connectivityFixActions;
+      connectivityGapReport.initialFindings = connectivityGapReportInitial?.findings || null;
+    }
+  });
+  if (connectivityGapReport) {
+    const f = connectivityGapReport.findings || {};
+    console.log(`ConnectivityGapReport[final]: shell_gaps=${f.shell_gaps} ` +
+                `vent_floating=${f.ventilation_floating} ` +
+                `vent_wrong_class=${f.ventilation_wrong_class} ` +
+                `portal_elev_mismatch=${f.portal_elevation_mismatch}`);
+  }
 
   // ════════════════════════════════════════════════════════════════════════
   // UNIVERSAL METADATA — Z convention, export profile
@@ -957,6 +1371,12 @@ export const handler = async (event) => {
   console.log('Adapter phase — building v2 artifacts from in-memory graph');
 
   // Inferred.json (v2 dual-write)
+  // Phase 6 — preserve featureFlags through the v2 round-trip. cssToResolved
+  // restructures top-level metadata (only the fields it lists), so re-stamp
+  // the flag onto legacyCss after resolvedToLegacyCss() — generate reads
+  // legacyCss (css_processed.json) and needs intentMode to know whether to
+  // run intent-driven door placement or the legacy heuristics.
+  const _featureFlagsForRoundTrip = css.metadata?.featureFlags || {};
   const inferred = cssToInferred(css);
 
   // Resolved.json (canonical v2 artifact)
@@ -964,6 +1384,23 @@ export const handler = async (event) => {
 
   // Legacy CSS (for Generate)
   const legacyCss = resolvedToLegacyCss(resolved);
+  // Re-stamp featureFlags (cssToResolved drops fields it doesn't enumerate).
+  if (!legacyCss.metadata) legacyCss.metadata = {};
+  legacyCss.metadata.featureFlags = _featureFlagsForRoundTrip;
+  // Phase 6B — re-stamp wallReconstruction so the Python generate lambda can
+  // emit IfcWallStandardCase from the plan. The v2 adapter strips unknown
+  // metadata keys.
+  if (css.metadata?.wallReconstruction) {
+    legacyCss.metadata.wallReconstruction = css.metadata.wallReconstruction;
+  }
+  // Re-stamp specInstances so the Python generate lambda can emit the
+  // deterministic spec-text instance set (62 walls, 5 slabs, 9 coverings,
+  // 27 ducts, 27 fittings, 5 doors, 4 equipment, 5 systems, 81 path
+  // connections, 122 ports) with correct material layers, hollow profiles,
+  // door lining/panel properties, etc. The v2 adapter strips this otherwise.
+  if (css.metadata?.specInstances) {
+    legacyCss.metadata.specInstances = css.metadata.specInstances;
+  }
 
   // Relationship property integrity check
   const anglesBefore = css.elements
@@ -976,13 +1413,16 @@ export const handler = async (event) => {
     console.warn(`RELATIONSHIP_PROP_LOSS: anglesBefore=${anglesBefore} anglesAfter=${anglesAfter} lost=${anglesBefore - anglesAfter}`);
   }
 
-  // Round-trip fidelity check
+  // Round-trip fidelity check — compare element_key (the canonical user-facing ID)
+  // since the adapter normalizes internal elem-* IDs back to element_key in output.
   const mismatches = [];
   for (let i = 0; i < css.elements.length; i++) {
     const orig = css.elements[i];
     const rt = legacyCss.elements[i];
     if (!rt) { mismatches.push({ index: i, id: orig.id, issue: 'missing in round-trip' }); continue; }
-    if (orig.id !== rt.id) mismatches.push({ id: orig.id, field: 'id', expected: orig.id, got: rt.id });
+    const origKey = orig.element_key || orig.id;
+    const rtKey = rt.element_key || rt.id;
+    if (origKey !== rtKey) mismatches.push({ id: orig.id, field: 'element_key', expected: origKey, got: rtKey });
     if (orig.type !== rt.type) mismatches.push({ id: orig.id, field: 'type', expected: orig.type, got: rt.type });
     if (orig.confidence !== rt.confidence) mismatches.push({ id: orig.id, field: 'confidence', expected: orig.confidence, got: rt.confidence });
     if (orig.geometry?.method !== rt.geometry?.method) mismatches.push({ id: orig.id, field: 'geometry.method', expected: orig.geometry?.method, got: rt.geometry?.method });
@@ -1042,6 +1482,32 @@ export const handler = async (event) => {
   }
 
   // ════════════════════════════════════════════════════════════════════════
+  // PR 8: TOPOLOGY VALIDATORS
+  // Runs after all processing and BEFORE S3 writes so _validationWarnings
+  // annotations land in legacyCss.elements (→ css_processed.json → generate).
+  // All severity: 'warning' — no halts.
+  // ════════════════════════════════════════════════════════════════════════
+
+  let _topoValSummary = { total: 0, passed: 0, warned: 0, failed: 0 };
+  try {
+    const _vr = runTopologyValidators(legacyCss.elements, legacyCss);
+    for (const entry of _vr.entries) logValidation(entry);
+    _topoValSummary = { total: _vr.total, passed: _vr.passed, warned: _vr.warned, failed: _vr.failed };
+    // Mirror annotations to css_structure.json (debug visibility)
+    if (_vr.entries.length > 0) {
+      const _cssById = new Map(css.elements.map(e => [e.element_key || e.id, e]));
+      for (const entry of _vr.entries) {
+        const e = _cssById.get(entry.element_id);
+        if (e) {
+          if (!e.metadata) e.metadata = {};
+          const w = e.metadata._validationWarnings = e.metadata._validationWarnings || [];
+          if (!w.includes(entry.validator)) w.push(entry.validator);
+        }
+      }
+    }
+  } catch (ve) { console.warn('[validators:topology] Non-fatal:', ve.message); }
+
+  // ════════════════════════════════════════════════════════════════════════
   // PHASE 6: WRITE ALL ARTIFACTS TO S3
   // ════════════════════════════════════════════════════════════════════════
 
@@ -1064,6 +1530,33 @@ export const handler = async (event) => {
     Bucket: bucket, Key: processedKey,
     Body: JSON.stringify(legacyCss), ContentType: 'application/json'
   }));
+
+  // Producer self-check: css_processed (halting — generate reads this).
+  await checkContractAsync('validatedCssContract', validatedCssContract, legacyCss, {
+    halting: true,
+    renderId,
+    stage: 'topology',
+    quarantineWriter: async (artifact, errors) => {
+      const runId = Date.now();
+      const qKey = `uploads/${userId}/${renderId}/quarantine/topology/${runId}/artifact.json`;
+      await s3.send(new PutObjectCommand({
+        Bucket: bucket, Key: qKey,
+        Body: JSON.stringify({
+          quarantinedAt: new Date().toISOString(),
+          stage: 'topology',
+          renderId,
+          contractErrors: errors.map(e => ({
+            path: e.path?.join('.') || '(root)',
+            message: e.message,
+            code: e.code,
+          })),
+          artifact,
+        }),
+        ContentType: 'application/json',
+      }));
+      console.warn(`[contract_quarantine] artifact written: s3://${bucket}/${qKey}`);
+    },
+  });
 
   // 3. inferred.json (v2)
   const inferredKey = `uploads/${userId}/${renderId}/pipeline/v${revision}/inferred.json`;
@@ -1146,6 +1639,81 @@ export const handler = async (event) => {
     Body: JSON.stringify(issueReport), ContentType: 'application/json'
   }));
 
+  // 7B. Engineer-intent report (Phase 6 — see PLAN.md). Always written when
+  // resolver is enabled (mode != 'off'); structure documented in
+  // intent-resolver.mjs. 6A uses this for diff against legacy inferOpenings.
+  if (intentReport) {
+    const intentReportKey = `uploads/${userId}/${renderId}/pipeline/v${revision}/engineer_intent_report.json`;
+    await s3.send(new PutObjectCommand({
+      Bucket: bucket, Key: intentReportKey,
+      Body: JSON.stringify(intentReport), ContentType: 'application/json'
+    }));
+  }
+
+  // 7C. Evidence reconciliation report — always written when the reconciler ran.
+  // Contains raw_door_candidates, accepted_doors, rejected_duplicate_or_symbolic_doors,
+  // expected_count, count_match.  Written from the pre-strip snapshot on css_structure.json
+  // so rejected candidates are visible even though css_processed.json excludes them.
+  if (css.metadata?.evidenceReconciliation) {
+    const reconKey = `uploads/${userId}/${renderId}/pipeline/v${revision}/evidence_reconciliation_report.json`;
+    await s3.send(new PutObjectCommand({
+      Bucket: bucket, Key: reconKey,
+      Body: JSON.stringify(css.metadata.evidenceReconciliation), ContentType: 'application/json'
+    }));
+  }
+
+  // 7C-Phase10. Coordinate-frame report — produced by Phase 10
+  // (applyCoordinateNormalization).  Captures bbox + centroid per source
+  // frame, transforms applied, and Phase 10 success gates.  Useful for
+  // debugging cross-source coordinate mismatches.
+  if (css.metadata?.coordinateNormalization) {
+    const coordKey = `uploads/${userId}/${renderId}/pipeline/v${revision}/coordinate_frame_report.json`;
+    await s3.send(new PutObjectCommand({
+      Bucket: bucket, Key: coordKey,
+      Body: JSON.stringify(css.metadata.coordinateNormalization),
+      ContentType: 'application/json',
+    }));
+    console.log(`Coordinate frame report: s3://${bucket}/${coordKey}`);
+  }
+
+  // 7D. Phase 6A.5 — Space classification + semantic door plan (planning-only).
+  if (spaceReport) {
+    const spaceKey = `uploads/${userId}/${renderId}/pipeline/v${revision}/space_classification_report.json`;
+    await s3.send(new PutObjectCommand({
+      Bucket: bucket, Key: spaceKey,
+      Body: JSON.stringify(spaceReport), ContentType: 'application/json'
+    }));
+    console.log(`Space classification report: s3://${bucket}/${spaceKey}`);
+  }
+  if (doorPlan) {
+    const planKey = `uploads/${userId}/${renderId}/pipeline/v${revision}/semantic_door_plan.json`;
+    await s3.send(new PutObjectCommand({
+      Bucket: bucket, Key: planKey,
+      Body: JSON.stringify(doorPlan), ContentType: 'application/json'
+    }));
+    console.log(`Semantic door plan: s3://${bucket}/${planKey}`);
+  }
+
+  // 7E. Phase 6B — Wall reconstruction plan.
+  if (wallReconReport) {
+    const wallKey = `uploads/${userId}/${renderId}/pipeline/v${revision}/wall_reconstruction_report.json`;
+    await s3.send(new PutObjectCommand({
+      Bucket: bucket, Key: wallKey,
+      Body: JSON.stringify(wallReconReport), ContentType: 'application/json'
+    }));
+    console.log(`Wall reconstruction report: s3://${bucket}/${wallKey}`);
+  }
+
+  // 7F. Phase 6C — Connectivity gap report (diagnostics).
+  if (connectivityGapReport) {
+    const gapKey = `uploads/${userId}/${renderId}/pipeline/v${revision}/connectivity_gap_report.json`;
+    await s3.send(new PutObjectCommand({
+      Bucket: bucket, Key: gapKey,
+      Body: JSON.stringify(connectivityGapReport), ContentType: 'application/json'
+    }));
+    console.log(`Connectivity gap report: s3://${bucket}/${gapKey}`);
+  }
+
   // 8. Transform debug (compatible with existing expectations)
   const debugKey = `uploads/${userId}/${renderId}/pipeline/v${revision}/transform_debug.json`;
   await s3.send(new PutObjectCommand({
@@ -1164,6 +1732,50 @@ export const handler = async (event) => {
   }));
 
   console.log(`TopologyEngine complete: ${totalDurationMs}ms, ${css.elements.length} elements, score=${readiness.score}, export=${readiness.exportReadiness}`);
+
+  // Phase 13 PR2: Trace end (Release 13.2: + scalars)
+  try { await flushAudit(); } catch (ae) { console.warn('[audit:flush_failed]', ae.message); }
+  if (_traceKey) {
+    try {
+      const typeHistogram = buildTypeHistogram(css.elements);
+
+      // gatePassRate: 6 discrete gates from rule assertions + CSS validation + export readiness
+      const _topoGates = [
+        (topologyReport?.checks?.zero_height?.removed_count ?? 0) === 0,
+        (topologyReport?.checks?.floating?.removed_count ?? 0) === 0,
+        (topologyReport?.checks?.connection_gaps?.warning_count ?? 0) === 0,
+        (topologyReport?.checks?.mep_containment?.warning_count ?? 0) === 0,
+        validationResult?.valid === true,
+        readiness?.exportReadiness === 'READY',
+      ];
+      const _topoPassed = _topoGates.filter(Boolean).length;
+      const _topoGateRate = Math.round(100 * _topoPassed / _topoGates.length);
+
+      // provenanceCompleteness: elements with non-missing provenance
+      const _topoElems = css.elements || [];
+      let _topoProvPct = null;
+      if (_topoElems.length > 0) {
+        const _attributed = _topoElems.filter(
+          e => e.provenance?.sourceFileStatus && e.provenance.sourceFileStatus !== 'missing'
+        ).length;
+        _topoProvPct = Math.round(100 * _attributed / _topoElems.length);
+      }
+
+      await writeTraceEnd({
+        traceKey: _traceKey, stage: 'topology', runId: _traceRunId, attemptN: _traceAttemptN,
+        startedAt: _traceStartedAt, finishedAt: new Date().toISOString(),
+        outputArtifactKey: processedKey,
+        counts: { elements: css.elements.length, byType: typeHistogram },
+        validationFlags: validationResult.errors.slice(0, 10).map(e => e.message || String(e)),
+        scalars: {
+          gatePassRate: _topoGateRate,
+          contractStatus: 'pass',
+          provenanceCompleteness: _topoProvPct,
+          validationSummary: _topoValSummary,
+        },
+      });
+    } catch (te) { console.warn('[trace] end write failed (non-fatal):', te.message); }
+  }
 
   // ════════════════════════════════════════════════════════════════════════
   // RETURN — combined output for Step Function

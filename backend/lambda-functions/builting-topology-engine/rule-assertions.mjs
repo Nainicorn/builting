@@ -53,6 +53,16 @@ export function runRuleAssertions(css, elementCountIn) {
       !Number.isFinite(origin.y) ||
       !Number.isFinite(origin.z)
     ) {
+      // SPACE elements are BIM containment containers — removing them loses
+      // the spatial hierarchy. Keep them with a fallback origin so generate
+      // can still emit IfcSpace with a placeholder placement.
+      if (type === 'SPACE') {
+        console.log(`ruleAssertions: floating SPACE kept — ${eid} (no placement, using origin 0,0,0)`);
+        if (!elem.placement) elem.placement = {};
+        elem.placement.origin = { x: 0, y: 0, z: 0 };
+        keep.push(elem);
+        continue;
+      }
       floatingRemoved.push({ id: eid, type: elem.type || 'UNKNOWN' });
       console.log(`ruleAssertions: floating removed — ${eid} (${elem.type})`);
       continue;

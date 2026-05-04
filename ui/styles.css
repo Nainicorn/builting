@@ -1,30 +1,27 @@
-/* Import Material Icons */
-@import './material.css';
-
 /* ─── Design Tokens ─── */
 :root {
-    /* Background layers — blue steel dark */
-    --bg-base: #000000;
-    --bg-surface: #0d1117;
-    --bg-elevated: #131a24;
-    --bg-hover: #192130;
-    --bg-active: #1e2838;
+    /* Background layers */
+    --bg-base: #090b0f;
+    --bg-surface: #0e1118;
+    --bg-elevated: #141820;
+    --bg-hover: #1c2028;
+    --bg-active: #232733;
 
-    /* Borders — steel blue tinted */
-    --border-subtle: #192130;
-    --border-default: #223044;
-    --border-strong: #2e4060;
+    /* Borders */
+    --border-subtle: #1e2230;
+    --border-default: #2a2f3d;
+    --border-strong: #3c4254;
 
     /* Text */
-    --text-primary: #e2e8f0;
-    --text-secondary: #8892a4;
-    --text-muted: #4d5a6e;
+    --text-primary: #e8eaed;
+    --text-secondary: #9aa3b2;
+    --text-muted: #5c6578;
 
-    /* Accent — Mistral orange */
-    --accent: #fa520f;
-    --accent-hover: #fb6424;
-    --accent-subtle: rgba(250, 82, 15, 0.12);
-    --accent-ring: rgba(250, 82, 15, 0.25);
+    /* Accent (saturated purple) */
+    --accent: #8b7cf6;
+    --accent-hover: #a292fa;
+    --accent-subtle: rgba(139, 124, 246, 0.1);
+    --accent-ring: rgba(139, 124, 246, 0.28);
 
     /* Status */
     --status-success: #34d399;
@@ -45,26 +42,16 @@
     --font-size-md: 16px;
     --font-size-lg: 20px;
 
-    /* Spacing — sharp Mistral corners */
-    --radius-sm: 1px;
-    --radius-md: 2px;
-    --radius-lg: 2px;
-    --radius-xl: 2px;
+    /* Spacing */
+    --radius-sm: 4px;
+    --radius-md: 6px;
+    --radius-lg: 8px;
+    --radius-xl: 12px;
 
     /* Transitions */
     --transition: 0.15s ease;
     --transition-layout: 0.2s ease-out;
 
-    /* Sensor / Telemetry semantic tokens */
-    --sensor-normal: #4ade80;
-    --sensor-warning: #facc15;
-    --sensor-critical: #ef4444;
-
-    /* Telemetry overlay glass — steel blue tinted */
-    --glass-bg: rgba(10, 14, 22, 0.90);
-    --glass-border: rgba(100, 140, 200, 0.15);
-    --glass-border-hover: rgba(100, 140, 200, 0.28);
-    --glass-text: #7a8fa8;
     --glass-text-hover: #e2e8f0;
 }
 
@@ -75,41 +62,8 @@
 
 /* ─── Selection ─── */
 ::selection {
-    background: rgba(250, 82, 15, 0.25);
-    color: #fff;
-}
-
-/* ─── Toast Notification ─── */
-.__toast {
-    position: fixed;
-    bottom: 24px;
-    left: 50%;
-    transform: translateX(-50%) translateY(20px);
-    background: var(--bg-elevated);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-md);
-    padding: 10px 20px;
-    font-size: var(--font-size-sm);
-    color: var(--text-primary);
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-    z-index: 20000;
-    opacity: 0;
-    transition: opacity 0.2s ease, transform 0.2s ease;
-    pointer-events: none;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.__toast.--visible {
-    opacity: 1;
-    transform: translateX(-50%) translateY(0);
-}
-
-.__toast-icon {
-    color: var(--status-success);
-    font-size: 16px;
-    line-height: 1;
+    background: rgba(124, 107, 189, 0.35);
+    color: #f0edf9;
 }
 
 /* ─── Global Reset ─── */
@@ -143,7 +97,7 @@ button {
     border-radius: var(--radius-md);
     padding: 8px 16px;
     font-size: var(--font-size-base);
-    font-weight: 400;
+    font-weight: 500;
     font-family: var(--font-family);
     transition: all var(--transition);
     background: transparent;

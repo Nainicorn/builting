@@ -1,0 +1,234 @@
+ZION TUNNEL FACILITY — SUPPLEMENTAL SPECIFICATIONS (REVISED)
+=============================================================
+Derived from Revit reference model BT_07.ifc (exported 2026-04-20).
+THIS DOCUMENT IS THE HIGHEST-AUTHORITY SOURCE. It supersedes ALL
+conflicting values in any other document in this folder, including
+Zion_Text_Description.docx and Table of Equipment_Final(update).docx.
+
+KNOWN CONFLICTS TO IGNORE IN OTHER DOCUMENTS:
+- Zion_Text_Description.docx says duct diameter = 1m → WRONG, use 0.5m
+- Zion_Text_Description.docx says East portal = 1295m → WRONG, use 1294m
+- Any fan CFM rating that differs from 9500 or 19000 CFM → use 9500/19000
+
+SCHEMA / COORDINATE SYSTEM
+----------------------------
+IFC version: IFC2X3
+Units: METRES throughout (all dimensions below are in metres unless noted)
+Coordinate precision: 1e-5 m (0.01 mm)
+Coordinate origin: (0, 0, 0) = shared Revit project base point
+Z=0 corresponds to Level 0 floor (absolute elevation 1290 m MSL)
+
+BUILDING STOREYS (LEVELS)
+--------------------------
+Level 0:  name='Level 0',  elevation = 1290.000 m MSL,  story height = 4.0 m
+Level 1:  name='Level 1',  elevation = 1294.000 m MSL,  story height = 4.0 m
+Inter-story rise: exactly 4.000 m
+
+NOTE: Level 1 elevation is 1294 m — NOT 1295 m. The level schedule CSV
+and the Revit model both confirm 1294 m. The 1295 m figure in the equipment
+document is incorrect and must be ignored.
+
+STRUCTURAL WALL SPECIFICATION
+-------------------------------
+Type:       Basic Wall — Concrete 200mm
+Material:   Concrete, Cast-in-Place gray  (RGB 192,192,192)
+Thickness:  0.200 m (200 mm)
+Primary wall heights:
+  - Standard:  4.000 m  (most walls, Levels 0 and 1)
+  - Tall:      5.000 m  (portal-facing walls and larger structural bays)
+  - Low:       3.000 m  (partition walls and secondary rooms)
+
+Wall lengths present in the model (from IFC rectangle profiles, metres):
+  30.20, 30.00,   — main longitudinal walls (tunnel axis-parallel)
+   8.30,  8.10,   — cross-bay walls
+   7.63,  7.58,   — intermediate bay walls
+   7.43 (×2),     — equipment room side walls
+   5.49 (×2),     — standard bay panels
+   5.29 (×2),     — standard bay panels (Level 1)
+   5.20,  5.09,   — mid-span walls
+   5.05,  5.00,   — smaller bays
+   4.80,  4.80,   — equipment alcove walls
+   3.60,  3.50,   — partition walls
+   3.49,  3.49,   — partition walls
+   3.39,  3.38,   — partition walls
+   2.39,  2.29,   — short walls / door surrounds
+   2.15 (×2),     — narrow panels
+   2.10 (×2),     — door-flanking walls
+   2.09 (×3)      — door-flanking walls (most common short wall)
+
+Total wall count: 62 (51 IfcWallStandardCase + 11 IfcWall)
+
+Thermal transmittance: 5.23 W/m²K
+IsExternal: TRUE for perimeter walls, FALSE for interior partitions
+
+FLOOR / SLAB SPECIFICATION
+---------------------------
+Type:         Floor — Grnd-Susp (suspended ground floor composite)
+Full type ID: Floor:Floor-Grnd-Susp_65Scr-80Ins-100Blk-75PC
+Total thickness: 0.320 m (320 mm)
+Layer composition (top to bottom):
+  Layer 1: Concrete, Sand/Cement Screed    65 mm
+  Layer 2: Rigid insulation                80 mm
+  Layer 3: Concrete Masonry, Floor Block  100 mm
+  Layer 4: Concrete, Precast               75 mm
+Base offset from storey axis: -0.100 m (floor hangs 100 mm below axis)
+Count: 5 slab instances distributed across Levels 0 and 1
+
+CEILING / COVERING SPECIFICATION
+----------------------------------
+Type:      Compound Ceiling — Plain
+Thickness: 0.057 m (57 mm = 56.99 mm)
+Layer composition:
+  Layer 1: Metal Stud Layer
+  Layer 2: Gypsum Wall Board
+Count: 9 ceiling instances (Levels 0 and 1)
+
+DOOR SPECIFICATION
+-------------------
+Type A — Interior Single (3 instances):
+  Family:   Doors_IntSgl
+  Size:     0.810 m wide × 2.110 m tall
+  Material: Metal Door — Brindle + Door Panel + Door Frame/Mullion + Architrave
+
+Type B — Double Flush Passage (2 instances):
+  Family:   M_Door-Passage-Double-Flush
+  Size:     1.700 m wide × 2.000 m tall  (note: IFC uses 1.8 m panel + frame)
+  Material: Metal Door — Brindle
+
+All 5 doors have associated IfcOpeningElement (void cut through wall) and
+IfcRelFillsElement relationships. Each door has IfcDoorLiningProperties and
+IfcDoorPanelProperties attached.
+
+VENTILATION DUCT SPECIFICATION
+--------------------------------
+Primary duct type:  Round Duct — Standard
+Diameter:           0.500 m  (500 mm)   ← THIS IS THE CORRECT VALUE.
+                    Prior spec of 1.0 m diameter is WRONG. Use 0.5 m.
+Material:           Aluminum
+
+Fan outlet duct diameters (different from main runs):
+  9500 CFM fan outlet:   0.1524 m (152.4 mm = 6 inches)
+  19000 CFM fan outlet:  0.2032 m (203.2 mm = 8 inches)
+
+Total duct segment count: 27 (all IfcFlowSegment)
+Duct segment lengths (metres):
+  28.543, 25.122, 24.654, 24.380, 18.990, 17.720, 16.670,
+   7.880,  7.300,  7.297,  6.100,  5.190,  4.940,  3.900,
+   3.800,  3.572,  0.996,  0.858,  0.825,  0.600,  0.575,
+   0.453,  0.404,  1.580 (estimated from remaining)
+
+DUCT FITTING SPECIFICATION
+----------------------------
+Type 1 — Round Elbow, 1D radius (25 instances):
+  Family: M_Round Elbow:1 D
+  Diameter: 0.500 m (matches main duct runs)
+
+Type 2 — Rectangular to Round Transition, 15 degrees (3 instances):
+  Family: M_Rectangular to Round Transition - Angle:15 Degree
+  Use: connects fan discharge (rectangular outlet) to round main duct
+
+Type 3 — Round Transition, 15 degrees (1 instance):
+  Family: M_Round Transition - Angle:15 Degree
+  Use: diameter reduction between duct runs
+
+Total fitting count: 27 (all IfcFlowFitting)
+
+HVAC SYSTEM STRUCTURE
+----------------------
+System type: Exhaust Air (all 5 systems are exhaust, no supply systems in model)
+
+System 1: Mechanical Exhaust_Air 1  — 15 duct/port members
+System 2: Mechanical Exhaust_Air 2  — 52 duct/port members
+System 3: Mechanical Exhaust_Air 3  — 67 duct/port members
+System 4: Mechanical Exhaust_Air 4  — 30 duct/port members
+System 5: Mechanical Exhaust_Air 5  —  6 duct/port members
+
+All 5 systems serve the main building (IfcRelServicesBuildings).
+Total distribution ports: 122 (SOURCE, SINK, SOURCEANDSINK types)
+Total path connections: 81 (IfcRelConnectsPathElements)
+
+EQUIPMENT SPECIFICATION
+------------------------
+Item 1 — Diesel Generator:
+  Family:   Caterpillar 3512C 1500 kW Tier 2
+  Capacity: 1500 kW
+  Tier:     2 (air-cooled)
+  Colors:   CAT Yellow / CAT Black
+  IFC type: IfcBuildingElementProxy
+
+Item 2 — Centrifugal Fan (small):
+  Family:   Centrifugal Fan - Inline - Belt Drive
+  Capacity: 9500 CFM
+  Outlet diameter: 0.1524 m (152.4 mm)
+  IFC type: IfcBuildingElementProxy
+
+Item 3 — Centrifugal Fan (large):
+  Family:   Centrifugal Fan - Inline - Belt Drive
+  Capacity: 19000 CFM
+  Outlet diameter: 0.2032 m (203.2 mm)
+  IFC type: IfcBuildingElementProxy
+
+Item 4 — Air Handling Unit:
+  Family:   AHU Fan Module - Rear Discharge Up
+  Size:     For 50 Square Feet of Coil
+  IFC type: IfcBuildingElementProxy
+
+Total equipment count: 4 items (all IfcBuildingElementProxy)
+
+MATERIAL PALETTE (complete)
+-----------------------------
+Structural:
+  Concrete, Cast-in-Place gray   (walls)
+  Concrete, Sand/Cement Screed   (floor layer 1)
+  Rigid insulation               (floor layer 2)
+  Concrete Masonry, Floor Block  (floor layer 3)
+  Concrete, Precast              (floor layer 4)
+
+Interior:
+  Metal Stud Layer               (ceiling layer 1)
+  Gypsum Wall Board              (ceiling layer 2)
+  Metal - Painted - Grey         (ceiling/wall finish)
+
+Doors:
+  Door - Handle
+  Door - Panel
+  Door - Architrave
+  Door - Frame/Mullion (1)
+  Metal Door - Brindle
+
+Equipment:
+  CAT Yellow
+  CAT Black
+  Aluminum                       (ducts)
+  <Unnamed>                      (fan body)
+
+TUNNEL BORE CROSS-SECTION (unchanged from VentSim model)
+----------------------------------------------------------
+Shape:      HORSESHOE (semicircular arched crown, vertical side walls)
+Width:      4.0 m at floor level
+Height:     4.0 m floor to crown
+Lining:     Reinforced concrete, 18–24 inches (460–600 mm) thick
+NOTE: The 200 mm walls above are for the portal BUILDING structure,
+not the tunnel bore lining. These are separate elements.
+
+PORTAL ELEVATIONS (corrected)
+-------------------------------
+West portal floor: 1290.000 m MSL  (= Level 0 in IFC)
+East portal floor: 1294.000 m MSL  (= Level 1 in IFC, 4 m above west)
+East ramp length:  ~25 m (ramp pitches from 1290 to 1294 over 25 m)
+Ramp grade:        4/25 = 16% (0.16 m/m = 16 cm rise per metre run)
+
+VERTICAL SHAFT (unchanged)
+----------------------------
+Collar elevation: 1310 m MSL
+Depth:            30 m (from collar to tunnel floor at 1290 m)
+Profile:          Circular
+Location:         Center-north of tunnel network (shaft fan position)
+
+IFC PATH CONNECTIONS (IfcRelConnectsPathElements)
+--------------------------------------------------
+Count: 81 relationships
+Connection types: ATSTART / ATEND (duct-to-duct at segment endpoints)
+All 27 duct segments are interconnected via these path relationships.
+Port connections: 122 IfcRelConnectsPortToElement bindings
+(each duct segment and fitting has in-port and out-port)

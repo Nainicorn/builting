@@ -563,5 +563,7 @@ export function storeyHeightFromOccupancy(occupancyType = '') {
   if (/retail|shop|mall|commercial/.test(occ)) return 4.5;
   if (/car.?park|parking|garage/.test(occ)) return 3.0;
   if (/lab|research|data.?cent/.test(occ)) return 4.0;
+  if (/school|education|university|classroom/.test(occ)) return 3.6;
+  if (/industrial|factory|manufactur|plant/.test(occ)) return 5.0;
   return 3.5; // office / default
 }

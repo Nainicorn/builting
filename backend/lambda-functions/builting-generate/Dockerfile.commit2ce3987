@@ -1,0 +1,24 @@
+FROM continuumio/miniconda3:latest
+
+RUN apt-get update && apt-get install -y curl wget ca-certificates git && rm -rf /var/lib/apt/lists/*
+
+RUN conda create -y -n lambda -c conda-forge python=3.11 ifcopenshell lark scipy && conda clean -a -y
+
+RUN /opt/conda/envs/lambda/bin/pip install --no-cache-dir awslambdaric boto3 trimesh numpy lark-parser scipy
+
+ENV LAMBDA_TASK_ROOT=/var/task
+WORKDIR ${LAMBDA_TASK_ROOT}
+
+# Clone the fixed code from git commit 2ce3987
+RUN git clone https://github.com/anthropics/text-to-3d /tmp/repo && \
+    cd /tmp/repo && \
+    git checkout 2ce3987 && \
+    cp /tmp/repo/backend/lambda-functions/builting-generate/lambda_function.py ${LAMBDA_TASK_ROOT}/ && \
+    cp -r /tmp/repo/backend/lambda-functions/builting-generate/lambda_package ${LAMBDA_TASK_ROOT}/ && \
+    rm -rf /tmp/repo
+
+ENV PATH=/opt/conda/envs/lambda/bin:$PATH
+ENV PYTHONPATH=${LAMBDA_TASK_ROOT}:/opt/conda/envs/lambda/lib/python3.11/site-packages
+
+ENTRYPOINT [ "/opt/conda/envs/lambda/bin/python", "-m", "awslambdaric" ]
+CMD [ "lambda_function.handler" ]

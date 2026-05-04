@@ -6,7 +6,7 @@
   "main": "index.mjs",
   "scripts": {
     "test": "vitest run",
-    "build": "esbuild index.mjs --bundle --minify --platform=node --target=node20 --outfile=dist/index.mjs --format=esm --external:@aws-sdk/* --external:sharp --banner:js=\"import{createRequire as __cr}from'module';const require=__cr(import.meta.url);\""
+    "build": "esbuild index.mjs --bundle --minify --platform=node --target=node20 --outfile=dist/index.mjs --format=esm --external:@aws-sdk/* --external:sharp --external:@builting/contracts --external:@builting/trace --external:@builting/audit --banner:js=\"import{createRequire as __cr}from'module';const require=__cr(import.meta.url);\""
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.989.0",

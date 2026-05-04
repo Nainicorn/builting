@@ -39,27 +39,65 @@ export function splitTunnelSubSegments(css) {
   if (!(css.elements || []).some(e => e.type === 'TUNNEL_SEGMENT')) return;
   if (!css.levelsOrSegments || !css.elements) return;
 
-  // Upper-zone threshold: 15% of total structure Z-range, clamped [0.3m, 3.0m].
-  // Scales with structure height so the split works for shallow mine tunnels (few metres)
-  // and deep urban tunnels (tens of metres) without a fixed constant.
-  const zRange = structureZRange(css.elements);
-  const UPPER_Z_THRESHOLD = zRange.range > 0
-    ? Math.min(3.0, Math.max(0.3, zRange.range * 0.15))
-    : 0.5;
-  console.log(`splitTunnelSubSegments: UPPER_Z_THRESHOLD=${UPPER_Z_THRESHOLD.toFixed(2)}m `
-    + `(derived from Z-range ${zRange.min.toFixed(1)}–${zRange.max.toFixed(1)}m)`);
+  // Only consider STRUCTURAL tunnel segments for Z-range — equipment/ducts on
+  // ceilings or portal structures should NOT trigger a multi-level split.
+  const structuralSegs = css.elements.filter(e =>
+    e.type === 'TUNNEL_SEGMENT' && e.properties?.branchClass === 'STRUCTURAL'
+  );
+  if (structuralSegs.length < 2) return;
 
-  // Scan elements for max upper-zone Z
+  // Collect sorted Z values of structural segments to detect genuine multi-level gaps
+  const structZs = structuralSegs
+    .map(e => e.placement?.origin?.z ?? 0)
+    .sort((a, b) => a - b);
+
+  // Look for a clear Z-gap in the structural segments — a range where no segments
+  // exist, indicating truly separate tunnel levels. A tunnel with continuous ramps
+  // has no gap and should NOT be split.
+  const MIN_GAP = 3.0; // 3m minimum gap between levels to justify a split
+  let bestGap = 0, splitZ = null;
+  for (let i = 1; i < structZs.length; i++) {
+    const gap = structZs[i] - structZs[i - 1];
+    if (gap > bestGap) {
+      bestGap = gap;
+      splitZ = (structZs[i - 1] + structZs[i]) / 2; // midpoint of the gap
+    }
+  }
+
+  const zMin = structZs[0], zMax = structZs[structZs.length - 1];
+  console.log(`splitTunnelSubSegments: structural Z-range ${zMin.toFixed(1)}–${zMax.toFixed(1)}m, `
+    + `largest Z-gap=${bestGap.toFixed(2)}m (need ≥${MIN_GAP}m to split)`);
+
+  if (bestGap < MIN_GAP) {
+    // No significant Z-gap — single-level tunnel with ramps/grades, no split needed
+    console.log(`splitTunnelSubSegments: single-level tunnel (no Z-gap ≥ ${MIN_GAP}m)`);
+    return;
+  }
+
+  // Guard: if the detected Z-gap is explained by the portal elevation grade, it is a
+  // continuous slope — NOT a genuine multi-level structure. Splitting here would create a
+  // spurious "upper" container that causes the generate lambda to mis-place one portal leg.
+  // Use 1.5× headroom to account for slight VentSim Z spread beyond the documented grade.
+  const _portalsWithElev = (css.metadata?.portals || []).filter(p => p.elevation_msl != null);
+  if (_portalsWithElev.length >= 2) {
+    const _elevs = _portalsWithElev.map(p => p.elevation_msl);
+    const _portalGrade = Math.max(..._elevs) - Math.min(..._elevs);
+    if (_portalGrade > 0 && bestGap <= _portalGrade * 1.5) {
+      console.warn(`splitTunnelSubSegments: SKIPPING SPLIT — Z-gap=${bestGap.toFixed(1)}m ≤ portal grade ${_portalGrade.toFixed(1)}m × 1.5 = ${(_portalGrade * 1.5).toFixed(1)}m. This is a graded single-level tunnel, not multi-level. Suppressing spurious split.`);
+      return;
+    }
+  }
+
+  const UPPER_Z_THRESHOLD = splitZ;
+
+  // Scan all elements for max upper-zone Z (for elevation tracking)
   let maxUpperZ = -Infinity;
   for (const elem of css.elements) {
     const z = elem.placement?.origin?.z ?? 0;
     if (z > UPPER_Z_THRESHOLD && z > maxUpperZ) maxUpperZ = z;
   }
 
-  if (maxUpperZ === -Infinity) {
-    // Nothing above threshold — single-level tunnel, no split needed
-    return;
-  }
+  if (maxUpperZ === -Infinity) return;
 
   // Identify the main segment (first SEGMENT entry, lowest elevation)
   const mainSeg = css.levelsOrSegments.find(s => s.type === 'SEGMENT') ?? css.levelsOrSegments[0];
@@ -115,8 +153,8 @@ export function splitTunnelSubSegments(css) {
  *   • Inherits cross-section profile of the smaller-area segment
  *   • Z path interpolates linearly between the two endpoint Z values
  *   • source: 'BRIDGE_INFERRED', confidence: 0.6
- *   • Uses unique synthetic entry_node/exit_node IDs so the G0.5 overlap-
- *     deduplication step does not collapse multiple bridges at the same node
+ *   • Uses actual VentSim nodeId for entry_node/exit_node so bridges
+ *     participate in topology graph and get PATH_CONNECTS relationships
  *
  * Run AFTER splitTunnelSubSegments (so bridges inherit updated containers) and
  * AFTER snapWallEndpoints, BEFORE buildTopologyGraph.
@@ -330,8 +368,8 @@ export function bridgeVSMNodes(css) {
           container:     exitEp.seg.container ?? 'seg-tunnel-main',
           relationships: [],
           properties: {
-            entry_node:          `${bridgeId}_in`,
-            exit_node:           `${bridgeId}_out`,
+            entry_node:          nodeId,
+            exit_node:           nodeId,
             branchClass:         'STRUCTURAL',
             shellThickness_m:    profile.wallThickness ?? shellThicknessFromProfile({ geometry: { profile }, properties: {} }, null),
             shellMode:           exitEp.seg.properties?.shellMode ?? 'HOLLOW_PROFILE',

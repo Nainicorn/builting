@@ -1,0 +1,30 @@
+{
+  "_category": "shape",
+  "_failureReason": "topology block is required at top level (resolvedToLegacyCss always emits the 6-array container, even when empty).",
+  "cssVersion": "1.0",
+  "domain": "BUILDING",
+  "facility": {
+    "name": "x", "type": "y", "description": "z",
+    "units": "M",
+    "origin": { "x": 0, "y": 0, "z": 0 },
+    "axes": "RIGHT_HANDED_Z_UP"
+  },
+  "levelsOrSegments": [],
+  "elements": [],
+  "metadata": {
+    "modelExtent": { "x": 0, "y": 0, "z": 0, "elementCount": 0 },
+    "safetyWarnings": [],
+    "exportProfile": "coordination",
+    "outputMode": "HYBRID",
+    "placementZIsAbsolute": true,
+    "sourceFusion": null,
+    "interiorSuppression": null,
+    "tunnelDecomposition": null,
+    "repairLog": [],
+    "cssValidationIssues": 0,
+    "facilityDimensions": [],
+    "materialAssignments": [],
+    "adapterSource": "resolvedToLegacyCss",
+    "resolvedSchemaVersion": "2.0"
+  }
+}

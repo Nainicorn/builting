@@ -1,0 +1,25 @@
+{
+  "_category": "shape",
+  "_failureReason": "top-level cssVersion is required",
+  "domain": "TUNNEL",
+  "facility": {
+    "name": "x", "type": "y", "description": "z",
+    "units": "M", "crs": null,
+    "origin": { "x": 0, "y": 0, "z": 0 },
+    "axes": "RIGHT_HANDED_Z_UP"
+  },
+  "levelsOrSegments": [],
+  "elements": [],
+  "metadata": {
+    "sourceFiles": [],
+    "outputMode": "HYBRID",
+    "validationStatus": "PENDING",
+    "unitNormalizationApplied": true,
+    "cssHash": null,
+    "elementCounts": {},
+    "bbox": {
+      "min": { "x": 0, "y": 0, "z": 0 },
+      "max": { "x": 0, "y": 0, "z": 0 }
+    }
+  }
+}

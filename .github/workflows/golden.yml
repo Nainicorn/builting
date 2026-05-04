@@ -1,0 +1,75 @@
+name: Golden Provenance Tests
+
+on:
+  push:
+    paths:
+      - 'backend/lambda-functions/**'
+      - 'backend/shared/contracts/**'
+      - 'tests/golden/**'
+  pull_request:
+    paths:
+      - 'backend/lambda-functions/**'
+      - 'backend/shared/contracts/**'
+      - 'tests/golden/**'
+  workflow_dispatch:
+    inputs:
+      fixture:
+        description: 'Run a single fixture (tunnel|building|no-spatial|all)'
+        required: false
+        default: 'all'
+
+# All jobs need AWS GovCloud credentials stored as repository secrets:
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN (if STS)
+env:
+  AWS_REGION: us-gov-east-1
+  S3_DATA_BUCKET: builting-data
+  S3_IFC_BUCKET: builting-ifc
+  DYNAMO_TABLE: builting-renders
+  STATE_MACHINE_ARN: arn:aws-us-gov:states:us-gov-east-1:008368474482:stateMachine:builting-state-machine
+  TEST_USER_ID: user-1
+
+jobs:
+  golden-tests:
+    name: Golden Provenance Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install ifcopenshell
+        run: pip install ifcopenshell
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Determine fixtures to run
+        id: fixtures
+        run: |
+          INPUT="${{ github.event.inputs.fixture || 'all' }}"
+          if [ "$INPUT" = "all" ]; then
+            echo "fixtures=tunnel building no-spatial" >> $GITHUB_OUTPUT
+          else
+            echo "fixtures=$INPUT" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run golden fixtures
+        run: |
+          bash tests/golden/run-golden.sh ${{ steps.fixtures.outputs.fixtures }}
+
+      - name: Upload IFC artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-ifc-artifacts
+          path: /tmp/golden-*.ifc
+          retention-days: 7

@@ -1,0 +1,10 @@
+# Calibration runs query production S3 and cache locally; never commit.
+.calibration-cache/
+.calibration-results.json
+
+# Pydantic-only build artifacts
+pydantic/build/
+pydantic/dist/
+pydantic/*.egg-info/
+__pycache__/
+*.pyc

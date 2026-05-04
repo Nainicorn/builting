@@ -196,6 +196,56 @@ export const CHECK_SEVERITY = {
   proxy_fallback_no_flag: 'warning'
 };
 
+// ── Engineer-Intent Resolver Profiles ──────────────────────────────────────
+// Per-domain tunables consumed by intent-resolver.mjs. The resolver is
+// generic; profile entries gate the heuristics it applies. Add a new entry
+// (e.g. RESIDENTIAL, WAREHOUSE) to support additional building types.
+
+export const INTENT_PROFILES = {
+  TUNNEL: {
+    door: {
+      perpDistMax:         15.0,    // max perpendicular distance from door to host (m)
+      portalPriorityFactor: 0.5,    // PORTAL_END_WALL effective-distance multiplier
+      validHostTypes:      ['TUNNEL_SEGMENT', 'PORTAL_END_WALL', 'PORTAL_BUILDING'],
+      faceSideRequired:    true     // resolve INTERIOR/EXTERIOR face for tunnel hosts
+    },
+    duct:   { runMaxGap: 0.5, requireFlowDirection: false },
+    access: { sources: ['portal_elevation', 'entrance_door'] }
+  },
+  BUILDING: {
+    door: {
+      perpDistMax:      1.0,
+      salvagePerpMax:   3.0,
+      widthRatioMax:    0.8,
+      ambiguityRatio:   0.92,
+      orientationTol:   0.2,
+      validHostTypes:   ['WALL'],
+      faceSideRequired: false
+    },
+    duct:   { runMaxGap: 0.2, requireFlowDirection: true },
+    access: { sources: ['storey_floor', 'entrance_door'] }
+  },
+  CIVIL: {
+    door:   { perpDistMax: 5.0, validHostTypes: ['WALL', 'TUNNEL_SEGMENT'], faceSideRequired: false },
+    duct:   { runMaxGap: 0.5, requireFlowDirection: false },
+    access: { sources: ['portal_elevation'] }
+  },
+  INDUSTRIAL: {
+    door:   { perpDistMax: 2.0, validHostTypes: ['WALL'], faceSideRequired: false },
+    duct:   { runMaxGap: 0.3, requireFlowDirection: false },
+    access: { sources: ['storey_floor', 'entrance_door'] }
+  }
+};
+
+// Resolver mode read once from env in index.mjs and mirrored into CSS metadata
+// so generate sees the same value without an env share.
+//   off          — resolver not invoked
+//   report       — resolver runs, writes engineer_intent_report.json, no element annotation
+//   consume-doors— intent.* fields drive door placement (no per-element fallback)
+//   consume-mep  — intent.* fields drive door + duct placement
+//   consume-all  — intent.* fields drive doors + ducts + inferred access surfaces
+export const INTENT_RESOLVER_MODES = ['off', 'report', 'consume-doors', 'consume-mep', 'consume-all'];
+
 // ── Blocks-Export Checks ───────────────────────────────────────────────────
 
 export const BLOCKS_EXPORT_CHECKS = new Set([

@@ -1,0 +1,40 @@
+{
+  "_category": "positive",
+  "_description": "Minimal valid generate→store event payload.",
+  "renderId": "render-abc",
+  "userId": "user-1",
+  "bucket": "builting-data",
+  "ifcGenerated": true,
+  "ifcValid": true,
+  "ifcSizeBytes": 12345,
+  "ifcS3Path": "s3://builting-ifc/user-1/render-abc/model.ifc",
+  "elementCounts": { "IfcWall": 4, "IfcSlab": 2 },
+  "bbox": {
+    "min": { "x": 0, "y": 0, "z": 0 },
+    "max": { "x": 10, "y": 10, "z": 3 }
+  },
+  "outputMode": "HYBRID",
+  "cssHash": "abc123def456",
+  "validationSummary": {
+    "valid": true,
+    "errorCount": 0,
+    "warningCount": 0,
+    "proxyCount": 0,
+    "proxyReasons": {},
+    "styleTierTotals": { "BASE": 6 },
+    "genericNameCount": 0,
+    "totalElements": 6,
+    "revitCompatScore": 95
+  },
+  "sourceFusion": null,
+  "tracingReport": {},
+  "structuralWarnings": [],
+  "orientationWarnings": [],
+  "tunnelShellReport": null,
+  "refinementReport": null,
+  "exportFormats": ["IFC4"],
+  "exportFiles": { "IFC4": { "s3Key": "user-1/render-abc/model.ifc", "sizeBytes": 12345 } },
+  "status": "complete",
+  "ai_generated_title": "Test Building",
+  "ai_generated_description": "A minimal test render."
+}

@@ -1,0 +1,39 @@
+{
+  "_category": "boundary",
+  "_failureReason": "element.confidence is bounded to [0, 1]; 1.5 just above the bound. Catches Zod min/max vs Pydantic ge/le drift.",
+  "cssVersion": "1.0",
+  "domain": "TUNNEL",
+  "facility": {
+    "name": "x", "type": "y", "description": "z",
+    "units": "M", "crs": null,
+    "origin": { "x": 0, "y": 0, "z": 0 },
+    "axes": "RIGHT_HANDED_Z_UP"
+  },
+  "levelsOrSegments": [],
+  "elements": [
+    {
+      "id": "el-1",
+      "type": "WALL",
+      "name": "wall-1",
+      "placement": null,
+      "geometry": null,
+      "relationships": [],
+      "properties": {},
+      "material": { "name": "concrete", "color": [0.5, 0.5, 0.5], "transparency": 0 },
+      "confidence": 1.5,
+      "source": "VSM"
+    }
+  ],
+  "metadata": {
+    "sourceFiles": [],
+    "outputMode": "HYBRID",
+    "validationStatus": "PENDING",
+    "unitNormalizationApplied": true,
+    "cssHash": null,
+    "elementCounts": { "WALL": 1 },
+    "bbox": {
+      "min": { "x": 0, "y": 0, "z": 0 },
+      "max": { "x": 0, "y": 0, "z": 0 }
+    }
+  }
+}

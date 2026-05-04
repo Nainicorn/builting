@@ -1,0 +1,28 @@
+{
+  "_category": "boundary",
+  "_failureReason": "validationSummary.errorCount is bounded to ints >= 0; -1 just below the lower bound.",
+  "renderId": "render-abc",
+  "userId": "user-1",
+  "ifcGenerated": true,
+  "ifcValid": true,
+  "ifcSizeBytes": 12345,
+  "ifcS3Path": "s3://builting-ifc/user-1/render-abc/model.ifc",
+  "elementCounts": {},
+  "bbox": {},
+  "outputMode": "HYBRID",
+  "cssHash": "abc",
+  "orientationWarnings": [],
+  "tunnelShellReport": null,
+  "validationSummary": {
+    "valid": true, "errorCount": -1, "warningCount": 0, "proxyCount": 0,
+    "proxyReasons": {}, "styleTierTotals": {}, "genericNameCount": 0,
+    "totalElements": 0, "revitCompatScore": 0
+  },
+  "sourceFusion": null,
+  "tracingReport": {},
+  "structuralWarnings": [],
+  "refinementReport": null,
+  "exportFormats": [],
+  "exportFiles": {},
+  "status": "ok"
+}

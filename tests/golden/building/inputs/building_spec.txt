@@ -1,0 +1,12 @@
+DOOR SCHEDULE — NORTHFIELD OFFICE BUILDING
+
+Door ID: DOOR-A001
+  Location: Room-101, North wall at x=2.5m from west corner
+  Type: Single swing, outward opening
+  Clear width: 0.900m
+  Height: 2.100m
+  Threshold elevation: 0.000m (Level 1)
+  Frame: Aluminum hollow metal
+  Hardware: Lever handle, passage set
+  Fire rating: None
+  Tag: A001

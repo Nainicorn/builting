@@ -1,0 +1,21 @@
+{
+  "name": "@builting/contracts",
+  "version": "0.1.0",
+  "description": "Pipeline boundary contracts — Zod side. Paired with builting_contracts (Pydantic).",
+  "type": "module",
+  "main": "index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./claims": "./zod/claims.mjs",
+    "./cssRaw": "./zod/cssRaw.mjs",
+    "./canonical": "./zod/canonical.mjs",
+    "./validatedCss": "./zod/validatedCss.mjs",
+    "./ifc": "./zod/ifc.mjs"
+  },
+  "scripts": {
+    "test": "node ci/run-roundtrip.mjs"
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  }
+}

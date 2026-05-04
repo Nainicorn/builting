@@ -1,4 +1,5 @@
 import { vecDist, vecNormalize, vecDot, vecSub, vecAdd, vecLen, vecCross, canonicalWallDirection } from './shared.mjs';
+import { logDecision } from '@builting/audit';
 
 // ============================================================================
 // PHASE 3-TOPO-B: BUILD PATH CONNECTIONS
@@ -53,7 +54,6 @@ function getElementRunDirection(elem) {
 function computeWallConnectionAngle(elemA, elemB) {
   const dirA = getElementRunDirection(elemA);
   const dirB = getElementRunDirection(elemB);
-  console.log('ANGLE_COMPUTE', JSON.stringify({ a: elemA?.element_key, b: elemB?.element_key, dirA, dirB }));
   if (!dirA || !dirB) return null;
 
   const nA = vecNormalize(dirA);
@@ -153,6 +153,19 @@ function buildPathConnections(css) {
               metadata: { shellRole: role, sourceElementType: bType, targetElementType: aType, connectionAngle: shellConnectionAngle }
             });
 
+            if (shellConnectionAngle) {
+              logDecision({ pass: 'buildPathConnections', element_id: a.element_key || a.id,
+                action: 'joint_classified', reason: 'angle_match',
+                params: { jointType: shellConnectionAngle.connectionType, angleDeg: shellConnectionAngle.angleDeg,
+                          targetId: b.element_key || b.id, role, sourceElementType: aType, targetElementType: bType } });
+            }
+
+            if (shellConnectionAngle?.connectionType) {
+              const tag = `topology:${shellConnectionAngle.connectionType.toLowerCase()}`;
+              if (a.provenance) a.provenance.modifications = [...(a.provenance.modifications || []), tag];
+              if (b.provenance) b.provenance.modifications = [...(b.provenance.modifications || []), tag];
+            }
+
             pathConnectCount++;
           }
         }
@@ -161,10 +174,12 @@ function buildPathConnections(css) {
         // Shell piece PATH_CONNECTS above are skipped in generate because shell pieces are replaced
         // by a single hollow solid — so we must add connections on the parent elements too.
         // Tunnel runs use branchKey (not elementKey) as their structural parent identifier.
+        // Skip bridge segments — they are filtered in generate (no IFC entity);
+        // the bridge bypass pass below creates direct structural↔structural connections instead.
         if (runA.shellPieces && runB.shellPieces && runA.branchKey && runB.branchKey) {
           const a = elemByKey.get(runA.branchKey);
           const b = elemByKey.get(runB.branchKey);
-          if (a && b) {
+          if (a && b && !a.properties?._isBridgeSegment && !b.properties?._isBridgeSegment) {
             const aType = a.type || 'UNKNOWN';
             const bType = b.type || 'UNKNOWN';
             const aEnd = inferRunEnd(runA, node.id);
@@ -193,6 +208,12 @@ function buildPathConnections(css) {
               role: 'STRUCTURAL_CONTINUITY',
               metadata: { shellRole: null, sourceElementType: bType, targetElementType: aType, connectionAngle: parentAngle }
             });
+            if (parentAngle) {
+              logDecision({ pass: 'buildPathConnections', element_id: a.element_key || a.id,
+                action: 'joint_classified', reason: 'angle_match',
+                params: { jointType: parentAngle.connectionType, angleDeg: parentAngle.angleDeg,
+                          targetId: b.element_key || b.id, sourceElementType: aType, targetElementType: bType } });
+            }
             pathConnectCount++;
           }
         }
@@ -237,6 +258,13 @@ function buildPathConnections(css) {
             role: 'STRUCTURAL_CONTINUITY',
             metadata: { shellRole: null, sourceElementType: bType, targetElementType: aType, connectionAngle }
           });
+
+          if (connectionAngle) {
+            logDecision({ pass: 'buildPathConnections', element_id: a.element_key || a.id,
+              action: 'joint_classified', reason: 'angle_match',
+              params: { jointType: connectionAngle.connectionType, angleDeg: connectionAngle.angleDeg,
+                        targetId: b.element_key || b.id, sourceElementType: aType, targetElementType: bType } });
+          }
 
           pathConnectCount++;
         }
@@ -350,8 +378,86 @@ function buildPathConnections(css) {
     }
   }
 
+  // --- BRIDGE BYPASS: Create direct connections between structural segments ---
+  // Bridge segments are filtered out during IFC generation (no IFC entity), so
+  // connections through bridges (structural→bridge→structural) fail resolution.
+  // This pass creates direct structural↔structural connections that bypass bridges.
+  const bridgeKeys = new Set(css.elements
+    .filter(e => e.properties?._isBridgeSegment)
+    .map(e => e.element_key || e.id));
+
+  let bridgeBypassCount = 0;
+  if (bridgeKeys.size > 0) {
+    // For each bridge, collect its non-bridge PATH_CONNECTS targets with interface info
+    for (const bridgeKey of bridgeKeys) {
+      const bridge = elemByKey.get(bridgeKey);
+      if (!bridge || !bridge.relationships) continue;
+
+      const structuralConns = [];
+      for (const rel of bridge.relationships) {
+        if (rel.type !== 'PATH_CONNECTS') continue;
+        if (bridgeKeys.has(rel.target)) continue; // skip bridge-to-bridge
+        structuralConns.push({
+          key: rel.target,
+          // Bridge's interface to this target — the TARGET's interface is what we want
+          // for the bypass (the structural segment's end that faces the bridge)
+          targetInterface: rel.targetInterface,
+          node: rel.targetInterface?.node || rel.sourceInterface?.node
+        });
+      }
+
+      // Connect all pairs of structural segments through this bridge
+      for (let i = 0; i < structuralConns.length; i++) {
+        for (let j = i + 1; j < structuralConns.length; j++) {
+          const a = elemByKey.get(structuralConns[i].key);
+          const b = elemByKey.get(structuralConns[j].key);
+          if (!a || !b) continue;
+
+          const aType = a.type || 'UNKNOWN';
+          const bType = b.type || 'UNKNOWN';
+
+          // Use the structural segments' interface kinds from their bridge connections
+          const aKind = structuralConns[i].targetInterface?.kind || 'NOTDEFINED';
+          const bKind = structuralConns[j].targetInterface?.kind || 'NOTDEFINED';
+
+          // Compute connection angle between the structural segments
+          const bypassAngle = (aType === 'WALL' || aType === 'TUNNEL_SEGMENT') && (bType === 'WALL' || bType === 'TUNNEL_SEGMENT')
+            ? computeWallConnectionAngle(a, b) : null;
+
+          if (!a.relationships) a.relationships = [];
+          if (!b.relationships) b.relationships = [];
+
+          a.relationships.push({
+            type: 'PATH_CONNECTS',
+            target: structuralConns[j].key,
+            sourceInterface: { kind: aKind, node: structuralConns[i].node },
+            targetInterface: { kind: bKind, node: structuralConns[j].node },
+            role: 'STRUCTURAL_CONTINUITY',
+            metadata: { shellRole: null, sourceElementType: aType, targetElementType: bType, connectionAngle: bypassAngle, bridgeBypass: bridgeKey }
+          });
+
+          b.relationships.push({
+            type: 'PATH_CONNECTS',
+            target: structuralConns[i].key,
+            sourceInterface: { kind: bKind, node: structuralConns[j].node },
+            targetInterface: { kind: aKind, node: structuralConns[i].node },
+            role: 'STRUCTURAL_CONTINUITY',
+            metadata: { shellRole: null, sourceElementType: bType, targetElementType: aType, connectionAngle: bypassAngle, bridgeBypass: bridgeKey }
+          });
+
+          bridgeBypassCount++;
+          pathConnectCount++;
+        }
+      }
+    }
+
+    if (bridgeBypassCount > 0) {
+      console.log(`buildPathConnections: ${bridgeBypassCount} bridge bypass connections added (${bridgeKeys.size} bridges skipped)`);
+    }
+  }
+
   if (!css.metadata) css.metadata = {};
-  css.metadata.pathConnections = { count: pathConnectCount };
+  css.metadata.pathConnections = { count: pathConnectCount, bridgeBypassCount };
   if (pathConnectCount > 0) {
     console.log(`buildPathConnections: ${pathConnectCount} path connections created`);
   }

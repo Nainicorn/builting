@@ -1,0 +1,22 @@
+FROM continuumio/miniconda3:latest
+
+RUN apt-get update && apt-get install -y curl wget ca-certificates && rm -rf /var/lib/apt/lists/*
+
+RUN conda create -y -n lambda -c conda-forge python=3.11 ifcopenshell lark scipy && conda clean -a -y
+
+RUN /opt/conda/envs/lambda/bin/pip install --no-cache-dir awslambdaric boto3 trimesh numpy lark-parser scipy
+
+# Force rebuild by invalidating cache with timestamp
+RUN echo "Build timestamp: $(date)"
+
+ENV LAMBDA_TASK_ROOT=/var/task
+WORKDIR ${LAMBDA_TASK_ROOT}
+
+COPY lambda_function.py ${LAMBDA_TASK_ROOT}/lambda_function.py
+COPY lambda_package/ ${LAMBDA_TASK_ROOT}/lambda_package/
+
+ENV PATH=/opt/conda/envs/lambda/bin:$PATH
+ENV PYTHONPATH=${LAMBDA_TASK_ROOT}:/opt/conda/envs/lambda/lib/python3.11/site-packages
+
+ENTRYPOINT [ "/opt/conda/envs/lambda/bin/python", "-m", "awslambdaric" ]
+CMD [ "lambda_function.handler" ]

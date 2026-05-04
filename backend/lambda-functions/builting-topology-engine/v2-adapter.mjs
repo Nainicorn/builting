@@ -101,10 +101,15 @@ export function cssToInferred(css) {
       sourceFile: elem.sourceFile || null,
       evidence: elem.metadata?.evidence || null,
       deterministic: true,
-      provenance: {
+      provenance: elem.provenance || {
+        sourceFile: elem.sourceFile || null,
+        sourceFileStatus: elem.sourceFile ? 'legacy' : 'missing',
+        sourceFiles: elem.sourceFile ? [elem.sourceFile] : [],
+        stage: 'extract',
+        modifications: [],
+      },
+      _inferenceProvenance: {
         inference_rule: inferenceRule,
-        inference_params: {},
-        source_observations: [],
         basis: provenanceBasis,
         resolutionPolicy: provenanceBasis === 'LEGACY_TRANSFORM' ? 'legacy_transform' : 'guarded_shell_v2'
       }
@@ -165,21 +170,28 @@ export function cssToResolved(css) {
         axis: elem.placement.axis || { x: 0, y: 0, z: 1 },
         refDirection: elem.placement.refDirection || { x: 1, y: 0, z: 0 }
       } : null,
-      geometry: geom ? {
-        intent: geom.method === 'EXTRUSION' ? 'extrusion' :
-               geom.method === 'SWEEP' ? 'sweep' :
-               geom.method === 'BREP' ? 'brep' :
-               (geom.mesh || geom.vertices) ? 'mesh' : 'extrusion',
-        method: geom.method || null,
-        profile: geom.profile || null,
-        path: geom.path || null,
-        pathPoints: geom.pathPoints || null,
-        depth: geom.depth || null,
-        direction: geom.direction || null,
-        vertices: geom.vertices || null,
-        faces: geom.faces || null,
-        meshRef: (geom.mesh || geom.vertices) ? 'inline' : null
-      } : null,
+      geometry: geom ? (() => {
+        const g = {
+          intent: geom.method === 'EXTRUSION' ? 'extrusion' :
+                 geom.method === 'SWEEP' ? 'sweep' :
+                 geom.method === 'BREP' ? 'brep' :
+                 (geom.mesh || geom.vertices) ? 'mesh' : 'extrusion',
+          method: geom.method || null,
+          profile: geom.profile || null,
+          path: geom.path || null,
+          pathPoints: geom.pathPoints || null,
+          depth: geom.depth || null,
+          direction: geom.direction || null,
+          vertices: geom.vertices || null,
+          faces: geom.faces || null,
+          meshRef: (geom.mesh || geom.vertices) ? 'inline' : null
+        };
+        // Preserve topology-engine annotations (_geoBehavior, _isTunnelShell, _pathAuthored, etc.)
+        for (const k of Object.keys(geom)) {
+          if (k.startsWith('_') && !(k in g)) g[k] = geom[k];
+        }
+        return g;
+      })() : null,
       container: elem.container || null,
       unresolvedContainer: !elem.container,
       relationships: (elem.relationships || []).map(r => ({ ...r, type: r.type, target: r.target })),
@@ -191,11 +203,12 @@ export function cssToResolved(css) {
       evidence: elem.metadata?.evidence || null,
       topologyMetadata: elem.metadata || null,
       sourceLayer: 'inferred',
-      provenance: {
-        source_observations: [],
-        source_inferred: [],
-        fieldWinners: {},
-        resolutionPolicy: 'legacy_transform'
+      provenance: elem.provenance || {
+        sourceFile: elem.sourceFile || null,
+        sourceFileStatus: elem.sourceFile ? 'legacy' : 'missing',
+        sourceFiles: elem.sourceFile ? [elem.sourceFile] : [],
+        stage: 'extract',
+        modifications: [],
       },
       locks: { humanLocked: false, lockedFields: [] },
       exportHints: {
@@ -238,7 +251,9 @@ export function cssToResolved(css) {
       repairLog: meta.repairLog || [],
       cssValidationIssues: meta.cssValidationIssues || 0,
       cssValidationDetails: meta.cssValidationDetails || undefined,
-      ambiguousWallProfiles: meta.ambiguousWallProfiles || undefined
+      ambiguousWallProfiles: meta.ambiguousWallProfiles || undefined,
+      facilityDimensions: meta.facilityDimensions || [],
+      materialAssignments: meta.materialAssignments || []
     }
   };
 }
@@ -287,6 +302,10 @@ export function resolvedToLegacyCss(resolved) {
         if (geom.vertices) g.vertices = geom.vertices;
         if (geom.faces) g.faces = geom.faces;
         if (geom.vertices || geom.meshRef === 'inline') g.mesh = true;
+        // Preserve topology-engine annotations (_geoBehavior, _isTunnelShell, _pathAuthored, etc.)
+        for (const k of Object.keys(geom)) {
+          if (k.startsWith('_') && !(k in g)) g[k] = geom[k];
+        }
         return g;
       })() : null,
       container: elem.container || null,
@@ -295,7 +314,14 @@ export function resolvedToLegacyCss(resolved) {
       material: elem.material || { name: 'default', color: [0.5, 0.5, 0.5], transparency: 0 },
       confidence: elem.confidence || 0.7,
       source: elem.source || 'LLM',
-      sourceFile: elem.sourceFile || null
+      sourceFile: elem.sourceFile || null,
+      provenance: elem.provenance || {
+        sourceFile: elem.sourceFile || null,
+        sourceFileStatus: elem.sourceFile ? 'legacy' : 'missing',
+        sourceFiles: elem.sourceFile ? [elem.sourceFile] : [],
+        stage: 'extract',
+        modifications: [],
+      },
     };
 
     // Preserve full metadata: evidence + topology placement metadata (zAligned, parentSegment, etc.)
@@ -336,6 +362,8 @@ export function resolvedToLegacyCss(resolved) {
       cssValidationIssues: rMeta.cssValidationIssues || 0,
       cssValidationDetails: rMeta.cssValidationDetails || undefined,
       ambiguousWallProfiles: rMeta.ambiguousWallProfiles || undefined,
+      facilityDimensions: rMeta.facilityDimensions || [],
+      materialAssignments: rMeta.materialAssignments || [],
       adapterSource: 'resolvedToLegacyCss',
       resolvedSchemaVersion: resolved.schemaVersion || '2.0'
     }

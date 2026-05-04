@@ -1,10 +1,15 @@
 # Text-to-3D Project — Architecture & Reference
 
+**Active Plan**: See `PLAN.md` for the current tunnel IFC fix plan — read it at the start of every session, work through fixes in order, and move completed items to the "Completed Fixes" section.
+
 **Constraints**
 - completed.md should contain everything that has been implemented, phases, tasks, & detailed information about the project
 - Separate each task into sub-tasks if needed and only after completion, move to the next task (go step by step)
 - Use plan mode everytime you plan out the next phase or tasks
-- Claude takes care of the zip, push image, deployment of all lambdas and any changes in AWS via AWS CLI which has been configured
+- Claude handles deployment: zip, push image, deploy all lambdas, and any AWS changes via AWS CLI (profile: `leidos`, region: `us-gov-east-1`)
+- Claude can check CloudWatch logs for any lambda: `aws logs tail /aws/lambda/builting-<name> --since 30m --region us-gov-east-1 --profile leidos`
+- **ALWAYS wipe the S3 IFC cache after deploying ANY pipeline lambda** (not just generate): `aws s3 rm s3://builting-ifc/cache/ --recursive --region us-gov-east-1 --profile leidos` — the generate lambda caches IFC files by CSS hash, so code changes won't take effect until the cache is cleared
+- **Reference tunnel IFC**: `sample/final.ifc` — engineer-built in Revit, the target output for tunnel renders. Compare generated IFC against this visually and by entity counts.
 
 **Pipeline Engineering Principles**
 - All pipeline changes must be universal — no render-type-specific hacks in generate. Fix problems upstream in extract/structure/geometry.
@@ -31,10 +36,10 @@ The `backend` folder contains the most recent code identical to the current setu
 
 | Resource | Value |
 |---|---|
-| **Account** | [redacted — GovCloud] |
+| **Account** | 008368474482 (GovCloud) |
 | **Region** | us-gov-east-1 |
 | **ARN prefix** | `arn:aws-us-gov` |
-| **CLI profile** | configured locally |
+| **CLI profile** | `leidos` |
 
 ---
 
@@ -81,7 +86,6 @@ The `backend` folder contains the most recent code identical to the current setu
    - `uploadService` — Request presigned S3 URLs and upload files/descriptions directly to S3
    - `usersService` — Fetch current user data and user info from backend
    - `userStore` — Client-side state manager for current user (session in memory + localStorage backup)
-   - `sensorService` — Polls GET /sensors (30s interval, visibility-aware pause), POST /sensors/refresh; provides live sensor readings for active render
 - **Dev server**: Vite on port 5001
 
 ---
@@ -93,30 +97,33 @@ The `backend` folder contains the most recent code identical to the current setu
 - **builting-users** — user accounts
    - PK: `id` (String), GSI: `email-index`
    - Fields: id, created_at, email, name, password (scrypt-hashed)
+   - Test users:
+      | id | name | email | password (plaintext) |
+      |---|---|---|---|
+      | user-1 | Sreenaina | skoujal@gmu.edu | Bujji1125$ |
+      | user-2 | Gesu | gmahmads@gmu.edu | builting |
+      | user-3 | Ibrahim | ihassane@gmu.edu | builting |
+      | user-4 | Tamanno | talimova@gmu.edu | builting |
+
 - **builting-renders** — per-user render records
    - PK: `user_id` (String), SK: `render_id` (String)
    - Fields: ai_generated_description, ai_generated_title, created_at, description, ifc_s3_path, s3_path, source_files, status
 
-- **builting-sensors** — simulated live sensor readings per render
-   - PK: `render_id` (String), SK: `sensor_id` (String)
-   - Fields: element_id, ifc_type, sensor_type, value, unit, status, last_updated
-
 ### Lambda Functions
 
-Pipeline order: **router -> read -> extract -> resolve -> topology-engine -> generate -> store -> sensors**
+Pipeline order: **router -> read -> extract -> resolve -> topology-engine -> generate -> store**
 
 All functions run on arm64 and share `builting-role`.
 
 | Function | Runtime | Notes |
 |---|---|---|
-| **builting-router** | Node.js 20 | API Gateway router for auth, user data, renders, presigned URLs, finalize (starts Step Function), sensor endpoints. ENV: STATE_MACHINE_ARN, SESSION_SECRET, ALLOWED_ORIGINS, SENSORS_TABLE |
+| **builting-router** | Node.js 20 | API Gateway router for auth, user data, renders, presigned URLs, finalize (starts Step Function). ENV: STATE_MACHINE_ARN, SESSION_SECRET, ALLOWED_ORIGINS |
 | **builting-read** | Node.js 20 | Retrieves render from DynamoDB and lists uploaded files from S3 |
 | **builting-extract** | Node.js 20 (esbuild-bundled, 512MB) | Downloads files from S3, extracts building specs as CSS v1.0 via Bedrock (Claude Sonnet 4.5) + VentSim/DXF/XLSX/DOCX parsers + multi-pass extraction + enrichment; dual-writes claims.json alongside css_raw.json; title block extraction (bottom-right crop + fallback), page role classification, coordinate-bearing prompts, spatial layout assembly, multi-page PDF (up to 5 pages rasterized via mupdf), scale calibration, dedicated scale bar extraction, vision-to-BuildingSpec bridge, component-based confidence model; image tiling for sheets >3500px (multi-image Bedrock call), PDF text layer injection as context, sharp for image crop/tile |
 | **builting-resolve** | Node.js 20 | NormalizeClaims + ResolveClaims — reads claims.json, normalizes units/conventions, groups by subject identity, resolves field conflicts, assigns canonical IDs, writes normalized_claims.json + canonical_observed.json + resolution_report.json + identity_map.json |
 | **builting-topology-engine** | Node.js 20 (512MB, 120s) | Consolidated structural inference, geometry build, and validation in single memory context. Pipeline: ValidateCSS -> RepairCSS -> NormalizeGeometry -> [TUNNEL] DecomposeTunnelShell -> SnapWallEndpoints (tiered 50mm->150mm) -> BuildTopology -> [BUILDING] MergeWalls -> CleanWallAxes -> InferOpenings -> CreateOpeningRelationships -> InferSlabs -> DeriveRoofElevation -> AlignSlabsToWalls -> SnapSlabsToWallBases -> GuaranteeBuildingEnvelope -> ClampDimensions -> BuildPathConnections (MITRE/BUTT/TEE) -> EquipmentMounting -> AnnotateSweepGeometry -> CSSValidation -> SafetyChecks -> ValidateTopology -> RunFullModelValidation -> v2 Adapter -> Write artifacts to S3 |
 | **builting-generate** | Python 3.11 container (512MB) | CSS-driven IFC4 generation with confidence-based semantic mapping, caching, inline IFC validation, self-healing PROXY_ONLY regeneration, mesh fallback, IfcSweptDiskSolid for circular ducts/pipes, IfcCircleHollowProfileDef for hollow profiles, v3 BIM semantics, common Psets, IfcRelConnectsPathElements, glTF (.glb) and OBJ export via trimesh |
 | **builting-store** | Node.js 20 | Updates DynamoDB with IFC path, elementCounts, outputMode, cssHash, and all validation fields |
-| **builting-sensors** | Node.js 20 | Seeds and refreshes simulated live sensor data per render; maps IFC element types to sensor types; max 20 sensors per type per render |
 
 ### Bedrock Model
 
@@ -125,7 +132,7 @@ All functions run on arm64 and share `builting-role`.
 ### Step Function
 
 - **builting-state-machine**
-- Pipeline: router -> read -> extract -> resolve -> topology-engine -> generate -> store -> sensors
+- Pipeline: router -> read -> extract -> resolve -> topology-engine -> generate -> store
 
 ### IAM
 
@@ -135,12 +142,12 @@ All functions run on arm64 and share `builting-role`.
 
 ### ECR
 
-- `[account-id].dkr.ecr.us-gov-east-1.amazonaws.com/builting-json-to-ifc`
+- `008368474482.dkr.ecr.us-gov-east-1.amazonaws.com/builting-json-to-ifc`
 
 ### API Gateway
 
-- **builting-api**
-- URL: configured via environment variable `VITE_API_BASE_URL`
+- **builting-api** (ID: `b665o7k8bc`)
+- URL: `https://b665o7k8bc.execute-api.us-gov-east-1.amazonaws.com/prod`
 - Stages: `dev`, `prod`
 - Structure:
 ```
@@ -166,12 +173,6 @@ All functions run on arm64 and share `builting-role`.
             /finalize
                POST
                OPTIONS
-            /sensors
-               GET
-               OPTIONS
-               /refresh
-                  POST
-                  OPTIONS
       /uploads
          /presigned
             OPTIONS
@@ -192,7 +193,6 @@ All functions run on arm64 and share `builting-role`.
 - /aws/lambda/builting-topology-engine
 - /aws/lambda/builting-generate
 - /aws/lambda/builting-store
-- /aws/lambda/builting-sensors
 
 ### S3 Buckets
 

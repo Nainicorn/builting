@@ -3,7 +3,7 @@
  * Extracted from builting-transform lines 306-575.
  */
 
-import { safe, clamp, sanitizeDir } from './shared.mjs';
+import { safe, clamp, sanitizeDir, canonicalWallDirection, vecDot } from './shared.mjs';
 
 // ============================================================================
 // VALIDATE CSS
@@ -241,6 +241,23 @@ export function normalizeGeometry(css) {
     if (elem.placement?.axis) sanitizeDir(elem.placement.axis);
     if (elem.placement?.refDirection) sanitizeDir(elem.placement.refDirection);
 
+    // Wall-aware direction recovery: sanitizeDir may set (0,0,1) for zero-vector
+    // refDirection, which is vertical — invalid for horizontal wall run direction.
+    // Recover via canonicalWallDirection's 4-level fallback chain.
+    const elemType = (elem.type || '').toUpperCase();
+    if (elemType === 'WALL' || elemType === 'COLUMN' || elemType === 'BEAM') {
+      const ref = elem.placement?.refDirection;
+      if (!ref || Math.abs(ref.z) > 0.5) {
+        canonicalWallDirection(elem); // writes back a horizontal refDirection
+      }
+      // Orthogonality guard: axis ⊥ refDirection
+      const ax = elem.placement?.axis;
+      const rd = elem.placement?.refDirection;
+      if (ax && rd && Math.abs(vecDot(ax, rd)) > 0.01) {
+        elem.placement.axis = { x: 0, y: 0, z: 1 };
+      }
+    }
+
     if (elem.geometry) {
       if (elem.geometry.depth !== undefined) {
         elem.geometry.depth = clamp(Math.abs(safe(elem.geometry.depth)), MAX_COORD);
@@ -266,6 +283,31 @@ export function normalizeGeometry(css) {
           p.y = clamp(safe(p.y) + shiftY, MAX_COORD);
           p.z = clamp(safe(p.z) + shiftZ, MAX_COORD);
         }
+      }
+      if (elem.geometry.path) {
+        for (const p of elem.geometry.path) {
+          p.x = clamp(safe(p.x) + shiftX, MAX_COORD);
+          p.y = clamp(safe(p.y) + shiftY, MAX_COORD);
+          p.z = clamp(safe(p.z) + shiftZ, MAX_COORD);
+        }
+      }
+    }
+
+    // Shift VentSim source coordinates so they stay consistent with placement.origin.
+    // Without this, generate's VentSim re-placement (which re-derives origin from
+    // startPoint/endPoint) would undo the normalization shift, displacing tunnel
+    // segments from their shell pieces.
+    const props = elem.properties;
+    if (props) {
+      if (props.startPoint) {
+        props.startPoint.x = clamp(safe(props.startPoint.x) + shiftX, MAX_COORD);
+        props.startPoint.y = clamp(safe(props.startPoint.y) + shiftY, MAX_COORD);
+        props.startPoint.z = clamp(safe(props.startPoint.z) + shiftZ, MAX_COORD);
+      }
+      if (props.endPoint) {
+        props.endPoint.x = clamp(safe(props.endPoint.x) + shiftX, MAX_COORD);
+        props.endPoint.y = clamp(safe(props.endPoint.y) + shiftY, MAX_COORD);
+        props.endPoint.z = clamp(safe(props.endPoint.z) + shiftZ, MAX_COORD);
       }
     }
   }

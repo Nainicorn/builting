@@ -13,8 +13,8 @@ const DXF_COLUMN_DEFAULT_DEPTH = 3.0;     // meters (when upgraded to COLUMN)
 const DXF_PROXY_DEFAULT_DEPTH = 0.2;      // meters (conservative PROXY depth)
 const DXF_COLUMN_RADIUS_MIN = 0.05;       // meters
 const DXF_COLUMN_RADIUS_MAX = 2.0;        // meters
-const DXF_WALL_MIN_SEGMENT_LENGTH = 1.0;  // meters (closed polyline)
-const DXF_WALL_OPEN_MIN_LENGTH = 2.0;     // meters (open single segment)
+const DXF_WALL_MIN_SEGMENT_LENGTH = 0.3;  // meters (closed polyline)
+const DXF_WALL_OPEN_MIN_LENGTH = 0.3;     // meters (open single segment — lowered to capture door-gap segs)
 const DXF_3D_Z_RANGE_THRESHOLD = 0.5;     // meters — triggers 3D warning
 const DXF_DIRECTION_FALLBACK = [1, 0, 0];
 const DXF_DEGENERATE_LENGTH = 1e-6;       // meters — segments shorter are skipped
@@ -120,11 +120,21 @@ function getSemanticUpgrade(layer, entityType, length, isClosed, radius) {
   if (/^A-FLOR/i.test(upper)) return 'SLAB';
   if (/^S-COLS/i.test(upper) && entityType === 'CIRCLE' && radius >= DXF_COLUMN_RADIUS_MIN && radius <= DXF_COLUMN_RADIUS_MAX) return 'COLUMN';
 
+  // AIA MEP standard layers: M-HVAC-* → DUCT, E-ELEC-* → EQUIPMENT, M-EQPM* → EQUIPMENT
+  if (/^M-HVAC/i.test(upper)) return 'DUCT';
+  if (/^E-ELEC/i.test(upper)) return 'EQUIPMENT';
+  if (/^M-EQPM/i.test(upper)) return 'EQUIPMENT';
+  if (/^P-PIPE/i.test(upper)) return 'PIPE';
+  if (/^E-LTNG/i.test(upper)) return 'EQUIPMENT';
+
   // Generic layer name patterns
   if (upper.startsWith('WALL') && (entityType === 'LINE' || entityType === 'LWPOLYLINE' || entityType === 'POLYLINE')) {
     if (isClosed && length >= DXF_WALL_MIN_SEGMENT_LENGTH) return 'WALL';
     if (!isClosed && length >= DXF_WALL_OPEN_MIN_LENGTH) return 'WALL';
   }
+  if (/^HVAC|^DUCT|^MECH-DUCT/i.test(upper)) return 'DUCT';
+  if (/^PIPE|^PLUMB/i.test(upper)) return 'PIPE';
+  if (/^ELEC|^E-EQPM|^EQPM/i.test(upper)) return 'EQUIPMENT';
   if (upper.startsWith('COLUMN') && (entityType === 'CIRCLE') &&
       radius >= DXF_COLUMN_RADIUS_MIN && radius <= DXF_COLUMN_RADIUS_MAX) {
     return 'COLUMN';
@@ -463,6 +473,10 @@ function expandInserts(entities, blocks, scale, depth = 0, visited = new Set(), 
         // Transform block entities
         const transformed = block.entities.map(be => {
           const cloned = JSON.parse(JSON.stringify(be));
+          // DXF BYBLOCK: entities on layer "0" inside a block inherit the INSERT's layer
+          if (cloned.layer === '0' || !cloned.layer) {
+            cloned.layer = entity.layer;
+          }
           transformEntity(cloned, insertPt, rotation, scaleX, scaleY, scaleZ, offsetX, offsetY, scale);
           return cloned;
         });

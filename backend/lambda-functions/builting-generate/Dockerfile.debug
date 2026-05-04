@@ -1,0 +1,9 @@
+FROM 008368474482.dkr.ecr.us-gov-east-1.amazonaws.com/builting-json-to-ifc:fixed-1777005281
+
+# Show what's in the image
+RUN echo "=== Checking lambda_function.py ===" && \
+    head -20 /var/task/lambda_function.py && \
+    echo "" && \
+    sed -n '5760,5765p' /var/task/lambda_function.py && \
+    echo "=== MD5 ===" && \
+    md5sum /var/task/lambda_function.py

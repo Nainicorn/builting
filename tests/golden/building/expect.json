@@ -1,0 +1,35 @@
+{
+  "_fixture": "building",
+  "_description": "Single-room building layout (Room-101, 6m×5m×3m) with door spec. Tests that the building pipeline stamps all non-spatial elements and produces no fabricated source files.",
+  "_last_verified": "2026-05-03",
+  "assertions": [
+    {
+      "name": "coverage_100pct",
+      "metric": "coverage_pct",
+      "op": "gte",
+      "value": 100,
+      "_comment": "All non-spatial elements must carry Pset_BuiltingProvenance."
+    },
+    {
+      "name": "total_products_gte_10",
+      "metric": "total_products",
+      "op": "gte",
+      "value": 10,
+      "_comment": "Regression gate — model must have at least 10 non-spatial elements."
+    },
+    {
+      "name": "walls_present",
+      "metric": "type_count",
+      "ifc_type": "IfcWall",
+      "op": "gte",
+      "value": 2,
+      "_comment": "At least 2 walls must be generated for the room enclosure."
+    },
+    {
+      "name": "no_fabricated_sources",
+      "metric": "no_fabricated_sources",
+      "allowed_source_patterns": [".vsm", ".dxf", ".txt", ".docx", ".csv", ".jpg", ".pdf"],
+      "_comment": "No element may reference a source file outside the allowed extension list."
+    }
+  ]
+}

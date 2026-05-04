@@ -1,12 +1,12 @@
 {{#if main}}
-<button class="__details-close" title="Close details">
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-</button>
-<div class="__details-body">
-  <div class="__details-title-section">
-    <h2 class="__details-title"></h2>
-  </div>
+<div class="__details-header">
+  <h2 class="__details-title"></h2>
+  <button class="__details-toggle" title="Collapse details">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+  </button>
+</div>
 
+<div class="__details-body">
   <div class="__details-section">
     <h3 class="__details-section-title">Description</h3>
     <p class="__details-description"></p>
@@ -17,49 +17,64 @@
     <div class="__details-files"></div>
   </div>
 
-  <div class="__details-section __details-refinement hidden">
-    <h3 class="__details-section-title">Refinement</h3>
-    <div class="__details-refinement-content"></div>
-  </div>
-
   <div class="__details-section __details-quality hidden">
     <h3 class="__details-section-title">Model Quality</h3>
     <div class="__details-quality-content"></div>
   </div>
+</div>
 
-  <div class="__details-section __details-stats hidden">
-    <h3 class="__details-section-title">Model Statistics</h3>
-    <div class="__details-stats-content"></div>
+<div class="__details-actions">
+  <button class="__details-view-more">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="13" height="13"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="8"/><line x1="12" y1="12" x2="12" y2="16"/></svg>
+    View Details
+  </button>
+  <button class="__details-delete" title="Delete render" aria-label="Delete render">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+  </button>
+</div>
+
+<!-- Details info modal -->
+<div class="__details-info-backdrop hidden"></div>
+<div class="__details-info-modal hidden" role="dialog" aria-modal="true">
+  <div class="__details-info-header">
+    <div class="__details-info-title-row">
+      <span class="__details-info-label">Render Details</span>
+      <span class="__details-info-sep">·</span>
+      <h3 class="__details-info-modal-title"></h3>
+    </div>
+    <button class="__details-info-close" title="Close">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    </button>
   </div>
-
-  <div class="__details-section __details-traceability hidden">
-    <h3 class="__details-section-title">Source Contributions</h3>
-    <div class="__details-traceability-content"></div>
-  </div>
-
-  <div class="__details-section __details-structural hidden">
-    <h3 class="__details-section-title">Structural Notes</h3>
-    <div class="__details-structural-content"></div>
-  </div>
-
-  <div class="__details-section __details-warnings hidden">
-    <h3 class="__details-section-title">Generation Notes</h3>
-    <div class="__details-warnings-content"></div>
-  </div>
-
-  <div class="__details-section __details-omitted hidden">
-    <h3 class="__details-section-title">Unmodeled Findings</h3>
-    <div class="__details-omitted-content"></div>
-  </div>
-
-  <div class="__details-section __details-sensors hidden">
-    <h3 class="__details-section-title">Live Telemetry</h3>
-    <div class="__details-sensors-content"></div>
-  </div>
-
-  <div class="__details-actions">
-    <button class="__details-download-report hidden" title="Download verification report">Download Report</button>
-    <button class="__details-delete" title="Delete this render">Delete Render</button>
+  <div class="__details-info-body">
+    <div class="__details-section __details-refinement hidden">
+      <h3 class="__details-section-title">Refinement</h3>
+      <div class="__details-refinement-content"></div>
+    </div>
+    <div class="__details-section __details-stats hidden">
+      <h3 class="__details-section-title">Model Statistics</h3>
+      <div class="__details-stats-content"></div>
+    </div>
+    <div class="__details-section __details-pipeline-trace hidden">
+      <h3 class="__details-section-title">Pipeline Trace</h3>
+      <div class="__details-pipeline-trace-content"></div>
+    </div>
+    <div class="__details-section __details-traceability hidden">
+      <h3 class="__details-section-title">Source Contributions</h3>
+      <div class="__details-traceability-content"></div>
+    </div>
+    <div class="__details-section __details-structural hidden">
+      <h3 class="__details-section-title">Notes</h3>
+      <div class="__details-structural-content"></div>
+    </div>
+    <div class="__details-section __details-warnings hidden">
+      <h3 class="__details-section-title">Generation Notes</h3>
+      <div class="__details-warnings-content"></div>
+    </div>
+    <div class="__details-section __details-omitted hidden">
+      <h3 class="__details-section-title">Unmodeled Findings</h3>
+      <div class="__details-omitted-content"></div>
+    </div>
   </div>
 </div>
 {{/if}}

@@ -1,4 +1,6 @@
 import { safe, clamp, elemId, vecNormalize, vecDot, vecCross, vecScale, vecAdd, vecSub, vecDist, vecLen, canonicalWallDirection, canonicalWallLength, canonicalWallThickness, setCanonicalWallLength, storeyHeightFromOccupancy, shellThicknessFromProfile } from './shared.mjs';
+import { CONFIDENCE } from './config.mjs';
+import { logDecision } from '@builting/audit';
 
 /**
  * Data-driven tunnel detection — check for TUNNEL_SEGMENT elements rather than
@@ -106,7 +108,7 @@ function guaranteeBuildingEnvelope(css) {
   for (const containerId of containers) {
     const containerWalls = wallsByContainer.get(containerId) || [];
     const containerSlabs = slabsByContainer.get(containerId) || [];
-    const info = storeyInfo[containerId] || { elevation: 0, height: 3.0 };
+    const info = storeyInfo[containerId] || { elevation: 0, height: _defaultH };
     const storeyZ = info.elevation;
     const storeyH = info.height;
 
@@ -189,6 +191,9 @@ function guaranteeBuildingEnvelope(css) {
         properties: { slabType: 'FLOOR', isFallback: true, isApproximation: true },
         relationships: []
       });
+      logDecision({ pass: 'guaranteeBuildingEnvelope', element_id: `env-floor-slab-${containerId}`,
+        action: 'element_created', reason: 'envelope_fallback',
+        params: { slabType: 'FLOOR', containerId, isFallback: true, confidence: 0.4 } });
     }
   }
 
@@ -259,7 +264,7 @@ function guaranteeBuildingEnvelope(css) {
       roofZ = topN[Math.floor(topN.length / 2)];
     }
     if (roofZ === null) {
-      roofZ = (lastLevel.elevation_m || 0) + (lastLevel.height_m || 3.0);
+      roofZ = (lastLevel.elevation_m || 0) + (lastLevel.height_m || _defaultH);
     }
 
     const bboxW = Math.max(gMaxX - gMinX, 3.0);
@@ -280,9 +285,15 @@ function guaranteeBuildingEnvelope(css) {
       properties: { slabType: 'ROOF', isFallback: true, isApproximation: true },
       relationships: []
     });
+    logDecision({ pass: 'guaranteeBuildingEnvelope', element_id: 'env-roof-slab',
+      action: 'element_created', reason: 'envelope_fallback',
+      params: { slabType: 'ROOF', containerId: roofContainer, isFallback: true, confidence: 0.4 } });
   }
 
   if (generated.length > 0) {
+    for (const ge of generated) {
+      ge.provenance = { sourceFile: null, sourceFileStatus: 'derived_inferred', sourceFiles: [], stage: 'topology:guaranteeBuildingEnvelope', modifications: [] };
+    }
     css.elements.push(...generated);
     if (!css.metadata) css.metadata = {};
     css.metadata.envelopeFallbackApplied = true;
@@ -294,6 +305,597 @@ function guaranteeBuildingEnvelope(css) {
     };
     console.log(`guaranteeBuildingEnvelope: generated ${generated.length} fallback elements across ${containers.size} container(s)`);
   }
+}
+
+
+// ============================================================================
+// ANCILLARY ROOM SLAB SYNTHESIS (TUNNEL renders with DXF walls)
+// ============================================================================
+
+/**
+ * Synthesize floor and roof slabs for ancillary rooms in tunnel models.
+ *
+ * Structural tunnel segments get floor slabs from the generate lambda's
+ * IFC-level injection. But DXF-walled ancillary rooms (AC room, diesel gen,
+ * exhaust chamber, etc.) are plain wall perimeters with no slab synthesis —
+ * guaranteeBuildingEnvelope skips them because hasTunnelSegments() is true.
+ *
+ * For each non-structural container with ≥4 DXF WALL elements:
+ *   - Compute the wall-bounded XY bbox
+ *   - Create a FLOOR slab at median wall base Z
+ *   - Create a ROOF slab at median wall top Z (or base + storey height)
+ */
+function synthesizeAncillaryRoomSlabs(css) {
+  if (!css.elements || css.elements.length === 0) return;
+  if (!hasTunnelSegments(css)) return; // only for tunnel renders
+
+  const levels = css.levelsOrSegments || [];
+  const defaultLevel = levels[0] || { id: 'level-1', elevation_m: 0 };
+
+  // Group WALL and SLAB elements by container
+  const wallsByContainer = new Map();
+  const slabsByContainer = new Map();
+  for (const e of css.elements) {
+    const c = e.container || defaultLevel.id;
+    const t = (e.type || '').toUpperCase();
+    if (t === 'WALL') {
+      if (!wallsByContainer.has(c)) wallsByContainer.set(c, []);
+      wallsByContainer.get(c).push(e);
+    } else if (t === 'SLAB') {
+      if (!slabsByContainer.has(c)) slabsByContainer.set(c, []);
+      slabsByContainer.get(c).push(e);
+    }
+  }
+
+  // Identify tunnel segment containers — skip ALL of them.
+  // Any container with a TUNNEL_SEGMENT gets its floor/roof from the generate lambda's
+  // IFC-level injection. Previously this only excluded branchClass=STRUCTURAL containers,
+  // which allowed the main level-1 container (holding portal building walls) to receive
+  // a massive ancillary slab spanning the entire tunnel footprint.
+  const structuralContainers = new Set();
+  for (const e of css.elements) {
+    if (e.type === 'TUNNEL_SEGMENT') {
+      const c = e.container || defaultLevel.id;
+      structuralContainers.add(c);
+      if (e.element_key) structuralContainers.add(e.element_key);
+      if (e.id) structuralContainers.add(e.id);
+    }
+  }
+
+  const SLAB_THICKNESS = 0.20;    // 200mm concrete slab
+  const MIN_WALLS = 4;            // closed room needs ≥4 walls
+  const MIN_FOOTPRINT = 1.0;      // minimum 1m in each dimension
+  const MAX_AREA = 1000;          // reject degenerate bbox > 1000m²
+  const MAX_ASPECT_RATIO = 20;    // reject extreme aspect ratios
+  const MAX_BORE_MULTIPLIER = 2;  // reject bbox > 2× tunnel bore width
+
+  // Median tunnel bore width — anything wider than 2× this is the whole
+  // tunnel envelope masquerading as a room, not an actual room.
+  const boreWidths = [];
+  for (const e of css.elements) {
+    if ((e.type || '').toUpperCase() !== 'TUNNEL_SEGMENT') continue;
+    const w = e.geometry?.profile?.width;
+    const r = e.geometry?.profile?.radius;
+    const bw = (typeof w === 'number' && w > 0) ? w
+             : (typeof r === 'number' && r > 0) ? r * 2 : null;
+    if (bw) boreWidths.push(bw);
+  }
+  const tunnelBoreWidth = boreWidths.length > 0
+    ? boreWidths.sort((a, b) => a - b)[Math.floor(boreWidths.length / 2)]
+    : null;
+
+  const generated = [];
+
+  for (const [containerId, containerWalls] of wallsByContainer) {
+    // Skip structural tunnel segment containers
+    if (structuralContainers.has(containerId)) continue;
+
+    // Skip containers that already have both floor and roof slabs
+    const existingSlabs = slabsByContainer.get(containerId) || [];
+    const hasFloor = existingSlabs.some(s =>
+      !s.properties?.slabType || s.properties.slabType === 'FLOOR');
+    const hasRoof = existingSlabs.some(s =>
+      (s.properties?.slabType || '').toUpperCase() === 'ROOF');
+    if (hasFloor && hasRoof) continue;
+
+    // Need enough walls to define a closed room
+    if (containerWalls.length < MIN_WALLS) continue;
+
+    // Compute wall-bounded bbox and Z ranges
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    const wallBaseZs = [];
+    const wallTopZs = [];
+
+    for (const wall of containerWalls) {
+      const o = wall.placement?.origin;
+      if (!o) continue;
+
+      const wz = o.z;
+      if (typeof wz === 'number') {
+        wallBaseZs.push(wz);
+        const wd = wall.geometry?.depth;
+        if (typeof wd === 'number' && wd > 0) {
+          wallTopZs.push(wz + wd);
+        }
+      }
+
+      const dir = canonicalWallDirection(wall);
+      const len = canonicalWallLength(wall);
+      if (dir && len > 0) {
+        const s = vecAdd(o, vecScale(dir, -len / 2));
+        const e = vecAdd(o, vecScale(dir, len / 2));
+        minX = Math.min(minX, s.x, e.x); maxX = Math.max(maxX, s.x, e.x);
+        minY = Math.min(minY, s.y, e.y); maxY = Math.max(maxY, s.y, e.y);
+      } else {
+        minX = Math.min(minX, o.x); maxX = Math.max(maxX, o.x);
+        minY = Math.min(minY, o.y); maxY = Math.max(maxY, o.y);
+      }
+    }
+
+    if (!isFinite(minX)) continue;
+
+    const bboxW = maxX - minX;
+    const bboxD = maxY - minY;
+    if (bboxW < MIN_FOOTPRINT || bboxD < MIN_FOOTPRINT) continue;
+
+    // Sanity checks: reject degenerate geometry
+    const area = bboxW * bboxD;
+    if (area > MAX_AREA) {
+      console.log(`synthesizeAncillaryRoomSlabs: skipping container ${containerId} — bbox area ${area.toFixed(0)}m² exceeds ${MAX_AREA}m² limit`);
+      continue;
+    }
+    const aspectRatio = Math.max(bboxW / bboxD, bboxD / bboxW);
+    if (aspectRatio > MAX_ASPECT_RATIO) {
+      console.log(`synthesizeAncillaryRoomSlabs: skipping container ${containerId} — aspect ratio ${aspectRatio.toFixed(1)} exceeds ${MAX_ASPECT_RATIO}:1 limit`);
+      continue;
+    }
+    if (tunnelBoreWidth !== null) {
+      const maxDim = Math.max(bboxW, bboxD);
+      const boreLimit = MAX_BORE_MULTIPLIER * tunnelBoreWidth;
+      if (maxDim > boreLimit) {
+        console.log(`synthesizeAncillaryRoomSlabs: skipping container ${containerId} — bbox max dimension ${maxDim.toFixed(1)}m exceeds ${MAX_BORE_MULTIPLIER}× tunnel bore width (${boreLimit.toFixed(1)}m). Container spans the tunnel envelope, not a room.`);
+        continue;
+      }
+    }
+
+    const centerX = (minX + maxX) / 2;
+    const centerY = (minY + maxY) / 2;
+
+    // Floor Z: median of wall base Z values
+    let floorZ = 0;
+    if (wallBaseZs.length > 0) {
+      const sorted = [...wallBaseZs].sort((a, b) => a - b);
+      floorZ = sorted[Math.floor(sorted.length / 2)];
+    }
+
+    // Skip containers elevated above ground level — their slabs come from the
+    // generate lambda's storey injection, not ancillary synthesis.
+    const MAX_ANCILLARY_FLOOR_Z = 2.0;
+    if (floorZ > MAX_ANCILLARY_FLOOR_Z) {
+      console.log(`synthesizeAncillaryRoomSlabs: skipping container ${containerId} — floorZ ${floorZ.toFixed(2)}m > ${MAX_ANCILLARY_FLOOR_Z}m`);
+      continue;
+    }
+
+    // Roof Z: median of wall top Z values, fallback to storey height
+    let roofZ = null;
+    if (wallTopZs.length > 0) {
+      const sorted = [...wallTopZs].sort((a, b) => b - a);
+      roofZ = sorted[Math.floor(sorted.length / 2)];
+    }
+    if (roofZ === null) {
+      const levelInfo = levels.find(l => l.id === containerId);
+      const storeyH = levelInfo?.height_m || 4.0;
+      roofZ = floorZ + storeyH;
+    }
+
+    if (!hasFloor) {
+      generated.push({
+        id: `ancillary-floor-${containerId}`,
+        element_key: `ancillary-floor-${containerId}`,
+        type: 'SLAB', name: 'Floor Slab', semanticType: 'IfcSlab',
+        confidence: 0.5, source: 'ANCILLARY_ROOM_SYNTH', container: containerId,
+        placement: {
+          origin: { x: centerX, y: centerY, z: floorZ },
+          axis: { x: 0, y: 0, z: 1 }, refDirection: { x: 1, y: 0, z: 0 }
+        },
+        geometry: {
+          method: 'EXTRUSION', direction: { x: 0, y: 0, z: 1 }, depth: SLAB_THICKNESS,
+          profile: { type: 'RECTANGLE', width: bboxW, height: bboxD }
+        },
+        material: { name: 'concrete_floor', color: [0.65, 0.65, 0.65], transparency: 0 },
+        properties: { slabType: 'FLOOR', isAncillaryRoom: true, isApproximation: true },
+        relationships: []
+      });
+    }
+
+    if (!hasRoof) {
+      generated.push({
+        id: `ancillary-roof-${containerId}`,
+        element_key: `ancillary-roof-${containerId}`,
+        type: 'SLAB', name: 'Roof Slab', semanticType: 'IfcSlab',
+        confidence: 0.5, source: 'ANCILLARY_ROOM_SYNTH', container: containerId,
+        placement: {
+          origin: { x: centerX, y: centerY, z: roofZ },
+          axis: { x: 0, y: 0, z: 1 }, refDirection: { x: 1, y: 0, z: 0 }
+        },
+        geometry: {
+          method: 'EXTRUSION', direction: { x: 0, y: 0, z: 1 }, depth: SLAB_THICKNESS,
+          profile: { type: 'RECTANGLE', width: bboxW, height: bboxD }
+        },
+        material: { name: 'concrete_roof', color: [0.60, 0.60, 0.60], transparency: 0 },
+        properties: { slabType: 'ROOF', isAncillaryRoom: true, isApproximation: true },
+        relationships: []
+      });
+    }
+  }
+
+  if (generated.length > 0) {
+    for (const ge of generated) {
+      ge.provenance = { sourceFile: null, sourceFileStatus: 'derived_inferred', sourceFiles: [], stage: 'topology:synthesizeAncillaryRoomSlabs', modifications: [] };
+    }
+    css.elements.push(...generated);
+    if (!css.metadata) css.metadata = {};
+    const floorCount = generated.filter(e => e.properties?.slabType === 'FLOOR').length;
+    const roofCount = generated.filter(e => e.properties?.slabType === 'ROOF').length;
+    const containerCount = new Set(generated.map(e => e.container)).size;
+    css.metadata.ancillaryRoomSlabSynthesis = { floorSlabs: floorCount, roofSlabs: roofCount, containersProcessed: containerCount };
+    console.log(`synthesizeAncillaryRoomSlabs: created ${generated.length} slabs (${floorCount} floor, ${roofCount} roof) across ${containerCount} ancillary room(s)`);
+  }
+}
+
+
+/**
+ * For each ancillary room (portal building room) that has a ceiling slab,
+ * synthesize one IfcCovering (suspended ceiling finish) just below it.
+ * Mirrors the same room-detection logic as synthesizeAncillaryRoomSlabs.
+ */
+export function synthesizeCoveringElements(css) {
+  if (!css.elements || css.elements.length === 0) return;
+  if (!hasTunnelSegments(css)) return;
+
+  const COVERING_THICKNESS = 0.057; // 57mm as spec'd
+  const MIN_WALLS = 4;
+  const MIN_FOOTPRINT = 1.0;
+  const MAX_AREA = 1000;
+  const MAX_ASPECT_RATIO = 20;
+
+  const levels = css.levelsOrSegments || [];
+
+  const wallsByContainer = new Map();
+  const coveringsByContainer = new Map();
+  const slabsByContainer = new Map();
+
+  for (const e of css.elements) {
+    const c = e.container || (levels[0]?.id || 'level-1');
+    const t = (e.type || '').toUpperCase();
+    if (t === 'WALL') {
+      if (!wallsByContainer.has(c)) wallsByContainer.set(c, []);
+      wallsByContainer.get(c).push(e);
+    } else if (t === 'COVERING') {
+      if (!coveringsByContainer.has(c)) coveringsByContainer.set(c, []);
+      coveringsByContainer.get(c).push(e);
+    } else if (t === 'SLAB') {
+      if (!slabsByContainer.has(c)) slabsByContainer.set(c, []);
+      slabsByContainer.get(c).push(e);
+    }
+  }
+
+  const structuralContainers = new Set();
+  for (const e of css.elements) {
+    if (e.type === 'TUNNEL_SEGMENT' &&
+        (e.properties?.branchClass || '').toUpperCase() === 'STRUCTURAL') {
+      if (e.container) structuralContainers.add(e.container);
+      if (e.element_key) structuralContainers.add(e.element_key);
+      if (e.id) structuralContainers.add(e.id);
+    }
+  }
+
+  const generated = [];
+
+  for (const [containerId, containerWalls] of wallsByContainer) {
+    if (structuralContainers.has(containerId)) continue;
+    if ((coveringsByContainer.get(containerId) || []).length > 0) continue;
+    if (containerWalls.length < MIN_WALLS) continue;
+
+    // Need a roof slab to anchor the covering to
+    const existingSlabs = slabsByContainer.get(containerId) || [];
+    const roofSlab = existingSlabs.find(s =>
+      (s.properties?.slabType || '').toUpperCase() === 'ROOF' || s.id?.includes('roof'));
+    if (!roofSlab) continue;
+
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    const wallTopZs = [];
+
+    for (const wall of containerWalls) {
+      const o = wall.placement?.origin;
+      if (!o) continue;
+      const wd = wall.geometry?.depth;
+      if (typeof o.z === 'number' && typeof wd === 'number' && wd > 0) {
+        wallTopZs.push(o.z + wd);
+      }
+      const dir = canonicalWallDirection(wall);
+      const len = canonicalWallLength(wall);
+      if (dir && len > 0) {
+        const s = vecAdd(o, vecScale(dir, -len / 2));
+        const e = vecAdd(o, vecScale(dir, len / 2));
+        minX = Math.min(minX, s.x, e.x); maxX = Math.max(maxX, s.x, e.x);
+        minY = Math.min(minY, s.y, e.y); maxY = Math.max(maxY, s.y, e.y);
+      } else {
+        minX = Math.min(minX, o.x); maxX = Math.max(maxX, o.x);
+        minY = Math.min(minY, o.y); maxY = Math.max(maxY, o.y);
+      }
+    }
+
+    if (!isFinite(minX)) continue;
+
+    const bboxW = maxX - minX;
+    const bboxD = maxY - minY;
+    if (bboxW < MIN_FOOTPRINT || bboxD < MIN_FOOTPRINT) continue;
+    if (bboxW * bboxD > MAX_AREA) continue;
+    if (Math.max(bboxW / bboxD, bboxD / bboxW) > MAX_ASPECT_RATIO) continue;
+
+    // Roof Z from the slab placement, falling back to wall-top median
+    let roofZ = roofSlab.placement?.origin?.z;
+    if (roofZ == null && wallTopZs.length > 0) {
+      const sorted = [...wallTopZs].sort((a, b) => b - a);
+      roofZ = sorted[Math.floor(sorted.length / 2)];
+    }
+    if (roofZ == null) continue;
+
+    const centerX = (minX + maxX) / 2;
+    const centerY = (minY + maxY) / 2;
+
+    generated.push({
+      id: `ancillary-ceiling-covering-${containerId}`,
+      element_key: `ancillary-ceiling-covering-${containerId}`,
+      type: 'COVERING',
+      name: 'Ceiling Covering',
+      semanticType: 'IfcCovering',
+      confidence: 0.6,
+      source: 'ANCILLARY_ROOM_SYNTH',
+      container: containerId,
+      placement: {
+        origin: { x: centerX, y: centerY, z: roofZ - COVERING_THICKNESS },
+        axis: { x: 0, y: 0, z: 1 },
+        refDirection: { x: 1, y: 0, z: 0 },
+      },
+      geometry: {
+        method: 'EXTRUSION',
+        direction: { x: 0, y: 0, z: 1 },
+        depth: COVERING_THICKNESS,
+        profile: { type: 'RECTANGLE', width: bboxW, height: bboxD },
+      },
+      material: { name: 'ceiling_tile', color: [0.95, 0.95, 0.93], transparency: 0 },
+      properties: { coveringType: 'CEILING', isAncillaryRoom: true, isApproximation: true },
+      relationships: [],
+    });
+  }
+
+  if (generated.length > 0) {
+    for (const ge of generated) {
+      ge.provenance = { sourceFile: null, sourceFileStatus: 'derived_inferred', sourceFiles: [], stage: 'topology:synthesizeCoveringElements', modifications: [] };
+    }
+    css.elements.push(...generated);
+    console.log(`synthesizeCoveringElements: created ${generated.length} ceiling covering(s)`);
+  }
+}
+
+
+// ============================================================================
+// PHASE: DEDUPLICATE OVERLAPPING STRUCTURAL TUNNEL SEGMENTS
+// Two-phase approach: (1) node-key normalization, (2) spatial proximity.
+// ============================================================================
+
+/**
+ * Remove duplicate structural tunnel segments that occupy the same physical space.
+ *
+ * Phase 1 — Node-key dedup:
+ *   Normalizes entry_node/exit_node pairs by sorting alphabetically so that
+ *   reversed-direction duplicates (A→B vs B→A) map to the same key.
+ *
+ * Phase 2 — Spatial proximity dedup:
+ *   O(n²) pairwise check for segments with same origin (< 0.5m) and same
+ *   bearing direction (|dot| > 0.9) but different node identities.
+ *
+ * Retention:
+ *   - Depth ratio > 2×: keep the shorter segment (longer is over-aggregation)
+ *   - Otherwise: keep lower element_key for deterministic reproducibility
+ */
+function deduplicateOverlappingTunnelSegments(css) {
+  if (!css.elements || css.elements.length === 0) return;
+  if (!hasTunnelSegments(css)) return;
+
+  const ORIGIN_TOL = 0.5;              // metres
+  const DIR_DOT_TOL = 0.9;             // |dot product| threshold
+  const LENGTH_MISMATCH_RATIO = 2.0;   // depth ratio threshold
+
+  const toRemove = new Set();
+  const decisions = [];
+
+  // Collect structural tunnel segments (exclude bridges — they share nodeIds
+  // and would be falsely collapsed by Phase 1 node-key dedup)
+  const structural = css.elements.filter(e =>
+    e.type === 'TUNNEL_SEGMENT' &&
+    (e.properties?.branchClass || '').toUpperCase() === 'STRUCTURAL' &&
+    !e.properties?._isBridgeSegment
+  );
+
+  if (structural.length < 2) return;
+
+  // ── Helpers ──
+
+  /** Bearing direction from placement.refDirection (NOT axis, which is Z-up). */
+  function segBearing(e) {
+    const rd = e.placement?.refDirection;
+    if (rd && (rd.x !== 0 || rd.y !== 0 || rd.z !== 0)) {
+      return vecNormalize(rd);
+    }
+    // Fallback: derive from pathPoints
+    const pp = e.geometry?.pathPoints || e.geometry?.path;
+    if (pp && pp.length >= 2) {
+      return vecNormalize(vecSub(pp[pp.length - 1], pp[0]));
+    }
+    return null;
+  }
+
+  /** Pick which segment to keep. Returns { keep, remove, retentionReason }. */
+  function pickKeeper(a, b) {
+    const dA = a.geometry?.depth || 0;
+    const dB = b.geometry?.depth || 0;
+    const minD = Math.min(dA, dB);
+    const maxD = Math.max(dA, dB);
+    const ratio = minD > 0 ? maxD / minD : Infinity;
+
+    if (ratio > LENGTH_MISMATCH_RATIO) {
+      const keep = dA <= dB ? a : b;
+      const remove = dA <= dB ? b : a;
+      return { keep, remove, retentionReason: `SHORTER_KEPT(ratio=${ratio.toFixed(1)})` };
+    }
+    // Deterministic: lower element_key wins
+    const keyA = a.element_key || a.id || '';
+    const keyB = b.element_key || b.id || '';
+    const keep = keyA <= keyB ? a : b;
+    const remove = keyA <= keyB ? b : a;
+    return { keep, remove, retentionReason: 'DETERMINISTIC_LOWER_KEY' };
+  }
+
+  // ── Phase 1: Node-key dedup (catches exact-match + reversed-node pairs) ──
+
+  const nodeMap = new Map(); // normalized key → element
+  for (const e of structural) {
+    const en = e.properties?.entry_node || '';
+    const ex = e.properties?.exit_node || '';
+    if (!en || !ex) continue;
+
+    // Sort node IDs so A→B and B→A yield the same key
+    const sorted = [en, ex].sort();
+    const pairKey = `${sorted[0]}→${sorted[1]}`;
+
+    if (nodeMap.has(pairKey)) {
+      const existing = nodeMap.get(pairKey);
+      if (toRemove.has(existing)) { nodeMap.set(pairKey, e); continue; }
+
+      const existingEn = existing.properties?.entry_node || '';
+      const existingEx = existing.properties?.exit_node || '';
+      const isReversed = (en === existingEx && ex === existingEn);
+      const dedupType = isReversed ? 'REVERSED_NODES' : 'EXACT_MATCH';
+
+      const { keep, remove, retentionReason } = pickKeeper(existing, e);
+      toRemove.add(remove);
+      nodeMap.set(pairKey, keep);
+      decisions.push({ keep, remove, dedupType, retentionReason });
+    } else {
+      nodeMap.set(pairKey, e);
+    }
+  }
+
+  // ── Phase 2: Spatial proximity dedup (catches different-node pairs) ──
+
+  const surviving = structural.filter(e => !toRemove.has(e));
+  const segData = surviving
+    .filter(e => e.placement?.origin && (e.geometry?.depth || 0) > 0)
+    .map(e => ({ elem: e, origin: e.placement.origin, dir: segBearing(e) }))
+    .filter(s => s.dir !== null);
+
+  for (let i = 0; i < segData.length; i++) {
+    if (toRemove.has(segData[i].elem)) continue;
+    for (let j = i + 1; j < segData.length; j++) {
+      if (toRemove.has(segData[j].elem)) continue;
+
+      const a = segData[i], b = segData[j];
+      const dist = vecDist(a.origin, b.origin);
+      if (dist > ORIGIN_TOL) continue;
+
+      const dot = Math.abs(vecDot(a.dir, b.dir));
+      if (dot < DIR_DOT_TOL) continue;
+
+      // Spatial overlap confirmed
+      const { keep, remove, retentionReason } = pickKeeper(a.elem, b.elem);
+      toRemove.add(remove);
+      decisions.push({ keep, remove, dedupType: 'SPATIAL_OVERLAP', retentionReason });
+    }
+  }
+
+  // ── Phase 3: Parallel endpoint dedup (catches near-matching path endpoints) ──
+  // Two segments with both endpoints within PARALLEL_SNAP are parallel drives
+  // (VentSim often exports the same tunnel bore twice with slightly offset coords).
+  // This was previously handled in generate (visual hide) — now done here for real removal.
+
+  const PARALLEL_SNAP = 8.0; // metres — accounts for Z offset between parallel drives
+  const surviving3 = structural.filter(e => !toRemove.has(e));
+
+  // Build endpoint data from geometry.path or placement + bearing
+  const endpointData = [];
+  for (const e of surviving3) {
+    const path = e.geometry?.path || e.geometry?.pathPoints;
+    let entry, exit;
+    if (path && path.length >= 2) {
+      const p0 = path[0], p1 = path[path.length - 1];
+      entry = { x: +p0.x || 0, y: +p0.y || 0, z: +p0.z || 0 };
+      exit = { x: +p1.x || 0, y: +p1.y || 0, z: +p1.z || 0 };
+    } else {
+      // Fallback: compute from placement + bearing * depth
+      const o = e.placement?.origin;
+      const dir = segBearing(e);
+      const depth = e.geometry?.depth || 0;
+      if (!o || !dir || depth <= 0) continue;
+      entry = { x: o.x - dir.x * depth / 2, y: o.y - dir.y * depth / 2, z: o.z - dir.z * depth / 2 };
+      exit = { x: o.x + dir.x * depth / 2, y: o.y + dir.y * depth / 2, z: o.z + dir.z * depth / 2 };
+    }
+    const prof = e.geometry?.profile || {};
+    const area = (prof.width || 0) * (prof.height || 0);
+    endpointData.push({ elem: e, entry, exit, area });
+  }
+
+  const paired = new Set();
+  for (let i = 0; i < endpointData.length; i++) {
+    if (paired.has(i) || toRemove.has(endpointData[i].elem)) continue;
+    for (let j = i + 1; j < endpointData.length; j++) {
+      if (paired.has(j) || toRemove.has(endpointData[j].elem)) continue;
+      const a = endpointData[i], b = endpointData[j];
+
+      // Check o1↔o2 & e1↔e2, or o1↔e2 & e1↔o2
+      const dOO = vecDist(a.entry, b.entry);
+      const dEE = vecDist(a.exit, b.exit);
+      const dOE = vecDist(a.entry, b.exit);
+      const dEO = vecDist(a.exit, b.entry);
+      const matched = (dOO < PARALLEL_SNAP && dEE < PARALLEL_SNAP) ||
+                      (dOE < PARALLEL_SNAP && dEO < PARALLEL_SNAP);
+      if (!matched) continue;
+
+      // Pick keeper: prefer more area, then more Z variation (slope data)
+      const dzA = Math.abs(a.exit.z - a.entry.z);
+      const dzB = Math.abs(b.exit.z - b.entry.z);
+      let keep, remove;
+      if (a.area > b.area) { keep = a.elem; remove = b.elem; }
+      else if (b.area > a.area) { keep = b.elem; remove = a.elem; }
+      else if (dzA >= dzB) { keep = a.elem; remove = b.elem; }
+      else { keep = b.elem; remove = a.elem; }
+
+      toRemove.add(remove);
+      decisions.push({ keep, remove, dedupType: 'PARALLEL_ENDPOINTS', retentionReason: dzA >= dzB || a.area > b.area ? 'MORE_AREA_OR_SLOPE' : 'MORE_AREA_OR_SLOPE' });
+      paired.add(i);
+      paired.add(j);
+      break;
+    }
+  }
+
+  // ── Apply removals ──
+
+  if (toRemove.size > 0) {
+    for (const d of decisions) {
+      const keptId = d.keep.element_key || d.keep.id;
+      const removedId = d.remove.element_key || d.remove.id;
+      const keptDepth = (d.keep.geometry?.depth || 0).toFixed(1);
+      const removedDepth = (d.remove.geometry?.depth || 0).toFixed(1);
+      console.log(`deduplicateOverlappingTunnelSegments: REMOVED ${removedId} (depth=${removedDepth}m) — kept ${keptId} (depth=${keptDepth}m) — ${d.dedupType}, ${d.retentionReason}`);
+    }
+    css.elements = css.elements.filter(e => !toRemove.has(e));
+    console.log(`deduplicateOverlappingTunnelSegments: removed ${toRemove.size} duplicate(s) total`);
+  }
+
+  if (!css.metadata) css.metadata = {};
+  css.metadata.overlappingSegmentsRemoved = toRemove.size;
 }
 
 
@@ -329,9 +931,11 @@ function validateOpeningPlacement(css) {
       hostWall = walls.find(w => (w.element_key || w.id) === hostKey);
     }
     if (!hostWall) {
-      // Find nearest wall — use relaxed threshold for inferred openings
+      // Find nearest wall — threshold scales with building size so openings
+      // at far ends of long walls aren't dropped (distance is to wall CENTER).
       const isInferred = opening.properties?.inferredFromBuildingType === true;
-      const maxHostDist = isInferred ? 5.0 : 2.0;
+      const maxWallHalfLen = Math.max(...walls.map(w => (canonicalWallLength(w) || 1) / 2), 2.0);
+      const maxHostDist = isInferred ? Math.max(5.0, maxWallHalfLen) : maxWallHalfLen;
       for (const w of walls) {
         const wo = w.placement?.origin;
         if (!wo) continue;
@@ -981,6 +1585,18 @@ function getWallEndpoints(wall) {
 function inferOpenings(css) {
   if (!css.elements || css.elements.length === 0) return;
 
+  // Phase 6B: when the engineer-intent resolver is in consume-doors mode (or
+  // higher), it has already chosen each door's host. We mirror its decisions
+  // into the legacy fields (hostWallKey/match/portal flag) so downstream
+  // passes (createOpeningRelationships, validateOpeningPlacement, the v2
+  // adapter) keep working unchanged. Doors WITHOUT intent are NOT scored or
+  // salvaged — strict no-fallback rule.
+  const intentMode = (css.metadata?.featureFlags?.intentMode || 'report').toLowerCase();
+  const consumeDoorIntent = ['consume-doors', 'consume-mep', 'consume-all'].includes(intentMode);
+  if (consumeDoorIntent) {
+    return _inferOpeningsFromIntent(css);
+  }
+
   const isTunnel = hasTunnelSegments(css);
 
   // Tunnel domain: assign doors/windows to nearest valid host.
@@ -1023,6 +1639,7 @@ function inferOpenings(css) {
         candidate.metadata.hostWallKey = bestKey;
         candidate.metadata.hostWallMatchScore = Math.max(0, 1 - bestDist / 15.0);
         candidate.metadata.hostIsPortalEndWall = bestIsPortal;
+        if (candidate.provenance) candidate.provenance.modifications = [...(candidate.provenance.modifications || []), 'topology:inferOpenings'];
         matched++;
 
         // Tunnel door Z-snap: set door Z to tunnel floor level (bottom of host segment).
@@ -1097,8 +1714,12 @@ function inferOpenings(css) {
       if (!candidate.metadata) candidate.metadata = {};
       candidate.metadata.hostWallKey = result.wallKey;
       candidate.metadata.hostWallMatchScore = result.score;
+      if (candidate.provenance) candidate.provenance.modifications = [...(candidate.provenance.modifications || []), 'topology:inferOpenings'];
       // Align opening orientation and position to host wall
       _alignOpeningToWall(candidate, walls, result.wallKey);
+      logDecision({ pass: 'inferOpenings', element_id: candidate.element_key || candidate.id,
+        action: 'opening_matched', reason: 'nearest_host',
+        params: { hostWallKey: result.wallKey, score: result.score, type: candidate.type } });
       matched++;
       continue;
     }
@@ -1115,6 +1736,7 @@ function inferOpenings(css) {
       candidate.metadata.hostWallMatchScore = salvageResult.score;
       candidate.metadata.salvageSnapped = true;
       candidate.metadata.isInferred = true;
+      if (candidate.provenance) candidate.provenance.modifications = [...(candidate.provenance.modifications || []), 'topology:inferOpenings'];
       // Mark evidence basis as inferred for provenance tracking
       if (!candidate.metadata.evidence) candidate.metadata.evidence = {};
       candidate.metadata.evidence.basis = 'INFERRED_OPENING_SNAP';
@@ -1122,6 +1744,9 @@ function inferOpenings(css) {
       setOrigin(candidate, salvageResult.snappedOrigin);
       // Align opening orientation to host wall
       _alignOpeningToWall(candidate, walls, salvageResult.wallKey);
+      logDecision({ pass: 'inferOpenings', element_id: candidate.element_key || candidate.id,
+        action: 'opening_matched', reason: 'salvage_snap',
+        params: { hostWallKey: salvageResult.wallKey, score: salvageResult.score, type: candidate.type } });
       matched++;
       continue;
     }
@@ -1149,6 +1774,62 @@ function inferOpenings(css) {
   _alignWindowSillHeights(css);
 
   console.log(`Opening inference: ${matched} matched, ${skipped} skipped`);
+}
+
+/**
+ * Phase 6B — intent-driven opening inference. Single decision-maker.
+ *
+ * Reads each DOOR/WINDOW's metadata.intent (written by intent-resolver.mjs)
+ * and mirrors it into the legacy fields createOpeningRelationships /
+ * validateOpeningPlacement / generate already understand:
+ *   - metadata.hostWallKey            ← intent.hostSegmentId
+ *   - metadata.hostWallMatchScore     ← intent.confidence
+ *   - metadata.hostIsPortalEndWall    ← intent.hostWallType === 'PORTAL_END_WALL'
+ *   - metadata.intentResolved         ← true (provenance marker)
+ *   - placement.origin                ← intent.position (resolved center)
+ *
+ * For tunnel hosts, intent.position.z is already snapped to floor + doorH/2
+ * by the resolver — mirror it onto placement.origin.z too, matching the
+ * legacy tunnel Z-snap behaviour.
+ *
+ * Strict rule: doors WITHOUT intent (or with skipReason / confidence below
+ * MEDIUM) are LEFT ALONE. Legacy scoring/salvage heuristics must not run.
+ */
+function _inferOpeningsFromIntent(css) {
+  let mirrored = 0;
+  let skippedNoIntent = 0;
+  let skippedLowConfidence = 0;
+  let skippedExplicitReject = 0;
+
+  for (const elem of css.elements || []) {
+    const t = (elem.type || '').toUpperCase();
+    if (t !== 'DOOR' && t !== 'WINDOW') continue;
+    const intent = elem.metadata?.intent;
+    if (!intent) { skippedNoIntent++; continue; }
+    if (intent.skipReason)        { skippedExplicitReject++; continue; }
+    if (!intent.hostSegmentId)    { skippedNoIntent++; continue; }
+    if ((intent.confidence ?? 0) < CONFIDENCE.MEDIUM) { skippedLowConfidence++; continue; }
+
+    if (!elem.metadata) elem.metadata = {};
+    elem.metadata.hostWallKey = intent.hostSegmentId;
+    elem.metadata.hostWallMatchScore = intent.confidence;
+    elem.metadata.hostIsPortalEndWall = intent.hostWallType === 'PORTAL_END_WALL';
+    elem.metadata.intentResolved = true;
+    if (elem.provenance) elem.provenance.modifications = [...(elem.provenance.modifications || []), 'topology:inferOpenings'];
+
+    if (intent.position) {
+      if (!elem.placement) elem.placement = {};
+      if (!elem.placement.origin) elem.placement.origin = {};
+      elem.placement.origin.x = intent.position.x;
+      elem.placement.origin.y = intent.position.y;
+      elem.placement.origin.z = intent.position.z;
+    }
+
+    mirrored++;
+  }
+  console.log(`Opening inference (intent mode): ${mirrored} mirrored, `
+    + `${skippedNoIntent} no_intent, ${skippedExplicitReject} resolver_rejected, `
+    + `${skippedLowConfidence} low_confidence`);
 }
 
 /**
@@ -1366,6 +2047,18 @@ function _alignWindowSillHeights(css) {
 // OPENING RELATIONSHIPS — VALIDATED VOIDS CREATION (v3.2 Task 2)
 // ============================================================================
 
+/**
+ * Append a VOIDS relationship to an opening, deduping by (type, target).
+ * Phase 6B — guard against duplicate VOIDS when intent and legacy logic
+ * disagree on host (validator flags duplicates as `contradictory_relationships`).
+ */
+function _addVoidsRel(opening, target) {
+  if (!opening.relationships) opening.relationships = [];
+  const exists = opening.relationships.some(r => r && r.type === 'VOIDS' && r.target === target);
+  if (exists) return;
+  opening.relationships.push({ type: 'VOIDS', target });
+}
+
 function createOpeningRelationships(css) {
   if (!css.elements || css.elements.length === 0) return;
 
@@ -1382,10 +2075,12 @@ function createOpeningRelationships(css) {
     }
   }
 
-  // Get storey heights for validation
+  // Get storey heights for validation — derive from occupancy, not hardcoded 3m
+  const _occOpen = (css.facilityMeta || css.metadata?.facilityMeta || {}).occupancy || '';
+  const _defaultHOpen = storeyHeightFromOccupancy(_occOpen);
   const storeyHeights = {};
   for (const level of (css.levelsOrSegments || [])) {
-    storeyHeights[level.id] = level.height_m || 3;
+    storeyHeights[level.id] = level.height_m || _defaultHOpen;
   }
 
   const toRemove = new Set();
@@ -1440,8 +2135,7 @@ function createOpeningRelationships(css) {
       }
       // All checks passed — create VOIDS relationship.
       // Use element_key as the canonical target (validator builds elementKeys from element_key).
-      if (!opening.relationships) opening.relationships = [];
-      opening.relationships.push({ type: 'VOIDS', target: hostWall.element_key || hostWall.id });
+      _addVoidsRel(opening, hostWall.element_key || hostWall.id);
       if (!opening.metadata) opening.metadata = {};
       opening.metadata.openingVoidsCreated = true;
       created++;
@@ -1451,7 +2145,7 @@ function createOpeningRelationships(css) {
     const openingWidth = getOpeningWidth(opening);
     const openingHeight = getOpeningHeight(opening);
     const wallLength = getWallHorizontalLength(hostWall);
-    const storeyHeight = storeyHeights[opening.container || 'level-1'] || 3;
+    const storeyHeight = storeyHeights[opening.container || 'level-1'] || _defaultHOpen;
 
     // Validation: opening width < min(10m, wallLength * 0.7)
     if (openingWidth >= Math.min(10, wallLength * 0.7)) {
@@ -1509,8 +2203,7 @@ function createOpeningRelationships(css) {
 
     // All checks passed — create VOIDS relationship.
     // Use element_key as the canonical target (validator builds elementKeys from element_key).
-    if (!opening.relationships) opening.relationships = [];
-    opening.relationships.push({ type: 'VOIDS', target: hostWall.element_key || hostWall.id });
+    _addVoidsRel(opening, hostWall.element_key || hostWall.id);
     if (!opening.metadata) opening.metadata = {};
     opening.metadata.openingVoidsCreated = true;
     created++;
@@ -1574,11 +2267,16 @@ function inferSlabs(css) {
     const t = (elem.type || elem.semantic_type || '').toUpperCase();
     if (t !== 'SLAB') continue;
     if (!elem.properties) elem.properties = {};
-    if (elem.properties.slabType) continue; // already typed
+    // Skip only if slabType is already a valid standard value.
+    // Non-standard values like COMPOSITE_FLOOR pass through so InferSlabs can assign
+    // the correct type (FLOOR vs ROOF) based on Z-proximity to wall bases and tops.
+    const _VALID_INFER_TYPES = new Set(['FLOOR', 'ROOF', 'BASESLAB', 'LANDING', 'NOTDEFINED', 'USERDEFINED']);
+    if (elem.properties.slabType && _VALID_INFER_TYPES.has(elem.properties.slabType.toUpperCase())) continue;
 
     const slabZ = elem.placement?.origin?.z;
     if (typeof slabZ !== 'number') {
       elem.properties.slabType = 'FLOOR';
+      if (elem.provenance) elem.provenance.modifications = [...(elem.provenance.modifications || []), 'topology:inferSlabs'];
       upgraded++;
       continue;
     }
@@ -1599,8 +2297,14 @@ function inferSlabs(css) {
 
       if (distToTop < distToBase && distToTop < 1.0) {
         elem.properties.slabType = 'ROOF';
+        logDecision({ pass: 'inferSlabs', element_id: elem.element_key || elem.id,
+          action: 'slab_typed', reason: 'geometric_proximity',
+          params: { slabType: 'ROOF', distToBase: Math.round(distToBase * 1000) / 1000, distToTop: Math.round(distToTop * 1000) / 1000 } });
       } else {
         elem.properties.slabType = 'FLOOR';
+        logDecision({ pass: 'inferSlabs', element_id: elem.element_key || elem.id,
+          action: 'slab_typed', reason: 'geometric_proximity',
+          params: { slabType: 'FLOOR', distToBase: Math.round(distToBase * 1000) / 1000, distToTop: Math.round(distToTop * 1000) / 1000 } });
       }
     } else {
       // Fallback: storey index (original logic)
@@ -1608,10 +2312,17 @@ function inferSlabs(css) {
       const levelIndex = levels.findIndex(l => l.id === c);
       if (levelIndex === levels.length - 1 && levels.length > 1 && levelIndex > 0) {
         elem.properties.slabType = 'ROOF';
+        logDecision({ pass: 'inferSlabs', element_id: elem.element_key || elem.id,
+          action: 'slab_typed', reason: 'storey_fallback',
+          params: { slabType: 'ROOF', levelIndex, totalLevels: levels.length } });
       } else {
         elem.properties.slabType = 'FLOOR';
+        logDecision({ pass: 'inferSlabs', element_id: elem.element_key || elem.id,
+          action: 'slab_typed', reason: 'storey_fallback',
+          params: { slabType: 'FLOOR', levelIndex, totalLevels: levels.length } });
       }
     }
+    if (elem.provenance) elem.provenance.modifications = [...(elem.provenance.modifications || []), 'topology:inferSlabs'];
     upgraded++;
   }
 
@@ -1675,12 +2386,14 @@ function validateBuildingStructure(css) {
   const warnings = [];
   const STOREY_Z_TOL = 0.5; // elements should be within ±0.5m of storey elevation
 
-  // Build storey elevation and height maps
+  // Build storey elevation and height maps — derive default from occupancy
+  const _occVal = (css.facilityMeta || css.metadata?.facilityMeta || {}).occupancy || '';
+  const _defaultHVal = storeyHeightFromOccupancy(_occVal);
   const storeyElevations = {};
   const storeyHeights = {};
   for (const level of css.levelsOrSegments || []) {
     storeyElevations[level.id] = level.elevation_m || 0;
-    storeyHeights[level.id] = level.height_m || 3;
+    storeyHeights[level.id] = level.height_m || _defaultHVal;
   }
 
   // Check exterior wall completeness
@@ -1880,10 +2593,12 @@ function inferSpaces(css) {
     wallsByContainer.get(c).push(e);
   }
 
-  // Build storey elevation map
+  // Build storey elevation map — derive default from occupancy
+  const _occSpace = (css.facilityMeta || css.metadata?.facilityMeta || {}).occupancy || '';
+  const _defaultHSpace = storeyHeightFromOccupancy(_occSpace);
   const storeyInfo = {};
   for (const level of levels) {
-    storeyInfo[level.id] = { elevation: level.elevation_m || 0, height: level.height_m || 3.0 };
+    storeyInfo[level.id] = { elevation: level.elevation_m || 0, height: level.height_m || _defaultHSpace };
   }
 
   let created = 0;
@@ -1915,7 +2630,7 @@ function inferSpaces(css) {
     const spaceD = maxY - minY;
     if (spaceW < 1.0 || spaceD < 1.0) continue; // too small to be a room
 
-    const info = storeyInfo[containerId] || { elevation: 0, height: 3.0 };
+    const info = storeyInfo[containerId] || { elevation: 0, height: _defaultHSpace };
     const spaceZ = info.elevation;
     const spaceH = info.height;
 
@@ -1956,9 +2671,51 @@ function inferSpaces(css) {
   }
 
   if (generated.length > 0) {
+    for (const ge of generated) {
+      ge.provenance = { sourceFile: null, sourceFileStatus: 'derived_inferred', sourceFiles: [], stage: 'topology:inferSpaces', modifications: [] };
+    }
     css.elements.push(...generated);
     console.log(`inferSpaces: created ${created} inferred space(s) from wall footprints`);
   }
+}
+
+/**
+ * Snap spec-text-derived SLAB elements to the nearest STOREY level elevation.
+ * Spec authors typically write round numbers ("4.0m") that drift slightly from
+ * the topology's level definitions ("4.1m" once level-0 height is added).
+ * Without this snap, spec slabs land 0.1-0.3m off the actual storey floor and
+ * read as "floating mid-air" in the viewer.
+ */
+function snapSpecSlabsToLevels(css) {
+  if (!css.elements || css.elements.length === 0) return;
+  const SNAP_THRESHOLD_M = 0.3;
+  const storeys = (css.levelsOrSegments || [])
+    .filter(l => (l.type || '').toUpperCase() === 'STOREY' && typeof l.elevation_m === 'number');
+  if (storeys.length === 0) return;
+  let snapped = 0;
+  for (const e of css.elements) {
+    if ((e.type || '').toUpperCase() !== 'SLAB') continue;
+    const isSpec = e.source === 'SPEC_TEXT' || e.properties?.specInstance === true;
+    if (!isSpec) continue;
+    const o = e.placement?.origin;
+    if (!o || typeof o.z !== 'number') continue;
+    let nearest = null, bestDelta = Infinity;
+    for (const s of storeys) {
+      const delta = Math.abs(o.z - s.elevation_m);
+      if (delta < bestDelta) { bestDelta = delta; nearest = s; }
+    }
+    if (nearest && bestDelta > 0 && bestDelta <= SNAP_THRESHOLD_M) {
+      const oldZ = o.z;
+      o.z = nearest.elevation_m;
+      e.provenance = e.provenance || {};
+      e.provenance.modifications = e.provenance.modifications || [];
+      e.provenance.modifications.push(
+        `topology:snapSpecSlabsToLevels: placement.origin.z ${oldZ} → ${nearest.elevation_m} (snapped to ${nearest.id})`
+      );
+      snapped++;
+    }
+  }
+  if (snapped > 0) console.log(`snapSpecSlabsToLevels: snapped ${snapped} spec slab(s) to nearest storey elevation`);
 }
 
 export {
@@ -1968,7 +2725,13 @@ export {
   clampAbsurdDimensions, clampWallsToEnvelope, snapWallEndpoints, alignSlabsToWalls,
   countAmbiguousProfiles, deduplicateRoofs,
   deriveRoofElevation, snapSlabsToWallBases, snapWallsToStoreyFloor, snapTunnelSegmentEndpoints,
-  validateSpaceContainment, inferSpaces
+  validateSpaceContainment, inferSpaces,
+  synthesizeAncillaryRoomSlabs, snapSpecSlabsToLevels,
+  deduplicateOverlappingTunnelSegments,
+  solveJunctionPositions,
+  trimSegmentsAtJunctions,
+  // Helpers exposed for engineer-intent resolver (intent-resolver.mjs)
+  projectPointToSegment, getWallHorizontalEndpoints, getOrigin, hasTunnelSegments, dist3
 };
 
 // Ambiguous profile count — now counted from canonical helper annotations
@@ -2091,6 +2854,8 @@ function snapWallEndpoints(css) {
         }
 
         const o = wall.placement.origin;
+        const _snapBefore = { x: o.x, y: o.y, z: o.z };
+        const _snapLenBefore = wd.len;
         o.x += originShift.x;
         o.y += originShift.y;
         o.z += originShift.z;
@@ -2112,6 +2877,12 @@ function snapWallEndpoints(css) {
         }
 
         ep.pt = { ...centroid };
+        if (wall.provenance) wall.provenance.modifications = [...(wall.provenance.modifications || []), 'topology:snap'];
+        logDecision({ pass: passName, element_id: wall.element_key || wall.id,
+          action: 'endpoint_modified', reason: 'snap_within_tolerance',
+          before: { origin: _snapBefore, length: _snapLenBefore },
+          after: { origin: { x: o.x, y: o.y, z: o.z }, length: wd.len },
+          params: { distance_mm: Math.round(shiftMag * 1000), tolerance_mm: Math.round(radius * 1000), endpoint: ep.which } });
         alreadySnapped.add(idx);
         passSnapped++;
         totalSnapped++;
@@ -2383,8 +3154,11 @@ function alignSlabsToWalls(css) {
     const containerWalls = wallsByContainer.get(container);
     if (!containerWalls || containerWalls.length === 0) continue; // no walls in this container — skip slab
 
-    // Compute wall bbox for this container only
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    // Compute ROBUST wall bbox — use only the main building walls, not outlier
+    // section walls (e.g. garage misplaced at y=15 when house ends at y=9).
+    // Collect all wall endpoint X and Y coordinates, then use the core cluster
+    // (reject endpoints that would more than double the footprint).
+    const allXs = [], allYs = [];
     for (const wall of containerWalls) {
       const dir = canonicalWallDirection(wall);
       if (!dir) continue;
@@ -2393,12 +3167,37 @@ function alignSlabsToWalls(css) {
       if (!wo) continue;
       const start = vecAdd(wo, vecScale(dir, -len / 2));
       const end = vecAdd(wo, vecScale(dir, len / 2));
-      minX = Math.min(minX, start.x, end.x);
-      maxX = Math.max(maxX, start.x, end.x);
-      minY = Math.min(minY, start.y, end.y);
-      maxY = Math.max(maxY, start.y, end.y);
+      allXs.push(start.x, end.x);
+      allYs.push(start.y, end.y);
     }
-    if (!isFinite(minX)) continue;
+    if (allXs.length === 0) continue;
+
+    // Sort and use 10th/90th percentile to define core footprint, then extend
+    // to include any wall within 2x that range (catches attached garages at
+    // correct positions but rejects wildly misplaced outliers).
+    allXs.sort((a, b) => a - b);
+    allYs.sort((a, b) => a - b);
+    const p10i = Math.floor(allXs.length * 0.1);
+    const p90i = Math.min(allXs.length - 1, Math.floor(allXs.length * 0.9));
+    const coreMinX = allXs[p10i], coreMaxX = allXs[p90i];
+    const coreMinY = allYs[p10i], coreMaxY = allYs[p90i];
+    const coreW = Math.max(coreMaxX - coreMinX, 1);
+    const coreH = Math.max(coreMaxY - coreMinY, 1);
+
+    // Include walls within 1.5x of core range (catches nearby sections)
+    let minX = coreMinX, maxX = coreMaxX, minY = coreMinY, maxY = coreMaxY;
+    for (const x of allXs) {
+      if (x >= coreMinX - coreW * 0.5 && x <= coreMaxX + coreW * 0.5) {
+        minX = Math.min(minX, x);
+        maxX = Math.max(maxX, x);
+      }
+    }
+    for (const y of allYs) {
+      if (y >= coreMinY - coreH * 0.5 && y <= coreMaxY + coreH * 0.5) {
+        minY = Math.min(minY, y);
+        maxY = Math.max(maxY, y);
+      }
+    }
 
     const wallExtentX = (maxX - minX) + 2 * OVERHANG;
     const wallExtentY = (maxY - minY) + 2 * OVERHANG;
@@ -2557,8 +3356,10 @@ function snapTunnelSegmentEndpoints(css) {
   if (!css.elements || css.elements.length === 0) return;
   if (!hasTunnelSegments(css)) return;
 
-  const SNAP_RADIUS = 0.05; // 50mm — high-precision engineering-grade snap for tunnel nodes
-  const MAX_ADJUST = 0.20;  // 200mm max origin shift to prevent mangling long elements
+  // Tiered snapping: Pass 1 high-confidence, Pass 2 repair orphans
+  const SNAP_PASS_1 = 0.05;  // 50mm — endpoints that are clearly the same point
+  const SNAP_PASS_2 = 0.15;  // 150mm — repair orphan endpoints not snapped in Pass 1
+  const MAX_ADJUST  = 0.25;  // 250mm max origin shift to prevent mangling long elements
 
   // Collect all tunnel segments and shell pieces with valid geometry
   const segs = css.elements.filter(e => {
@@ -2568,94 +3369,538 @@ function snapTunnelSegmentEndpoints(css) {
   });
   if (segs.length < 2) return;
 
+  // Resolve the actual bore direction — placement.axis is often {0,0,1} (vertical)
+  // for tunnel segments, with the real bearing in placement.refDirection.
+  function getBearing(elem) {
+    const axis = elem.placement?.axis ? vecNormalize(elem.placement.axis) : null;
+    const refDir = elem.placement?.refDirection ? vecNormalize(elem.placement.refDirection) : null;
+    if (axis && Math.abs(axis.z) > 0.9 && refDir) return refDir; // vertical axis → use refDirection
+    if (axis) return axis;
+    if (refDir) return refDir;
+    return null;
+  }
+
   // Pre-compute entry/exit endpoints for each segment
   const segData = segs.map(elem => {
     const o = elem.placement.origin;
-    const axis = vecNormalize(elem.placement.axis);
-    if (!axis) return null;
+    const bearing = getBearing(elem);
+    if (!bearing) return null;
     const depth = elem.geometry.depth;
-    const entry = vecAdd(o, vecScale(axis, -depth / 2));
-    const exit  = vecAdd(o, vecScale(axis,  depth / 2));
-    return { elem, axis, depth, entry, exit };
+    const entry = vecAdd(o, vecScale(bearing, -depth / 2));
+    const exit  = vecAdd(o, vecScale(bearing,  depth / 2));
+    return { elem, bearing, depth, entry, exit, snapped: false };
   }).filter(Boolean);
 
-  let snapped = 0;
+  let pass1Snapped = 0;
+  let pass2Snapped = 0;
 
-  // O(n²) pair check — tunnel models rarely exceed ~100 segments, so this is fine
-  for (let i = 0; i < segData.length; i++) {
-    for (let j = i + 1; j < segData.length; j++) {
-      const a = segData[i];
-      const b = segData[j];
+  function runSnapPass(radius, passName, segData) {
+    let passSnapped = 0;
 
-      // Same element — skip
-      if (a.elem === b.elem) continue;
+    // O(n²) pair check — tunnel models rarely exceed ~100 segments, so this is fine
+    for (let i = 0; i < segData.length; i++) {
+      for (let j = i + 1; j < segData.length; j++) {
+        const a = segData[i];
+        const b = segData[j];
 
-      // Only snap between same shell-piece role so we don't cross LEFT_WALL with ROOF etc.
-      const aRole = a.elem.properties?.shellPiece || '_parent';
-      const bRole = b.elem.properties?.shellPiece || '_parent';
-      if (aRole !== bRole) continue;
+        // Same element — skip
+        if (a.elem === b.elem) continue;
 
-      // Check both orientations: exit[a]≈entry[b] and entry[a]≈exit[b]
-      const checks = [
-        { aEnd: 'exit',  bEnd: 'entry' },
-        { aEnd: 'entry', bEnd: 'exit'  },
-      ];
+        // In pass 2, skip pairs where both were already snapped
+        if (passName === 'pass2' && a.snapped && b.snapped) continue;
 
-      for (const { aEnd, bEnd } of checks) {
-        const aPt = a[aEnd];
-        const bPt = b[bEnd];
-        const dist = vecDist(aPt, bPt);
-        if (dist >= SNAP_RADIUS || dist < 1e-6) continue;
+        // Check both orientations: exit[a]≈entry[b] and entry[a]≈exit[b]
+        const checks = [
+          { aEnd: 'exit',  bEnd: 'entry' },
+          { aEnd: 'entry', bEnd: 'exit'  },
+        ];
 
-        // Snap to midpoint
-        const mid = {
-          x: (aPt.x + bPt.x) / 2,
-          y: (aPt.y + bPt.y) / 2,
-          z: (aPt.z + bPt.z) / 2,
-        };
+        for (const { aEnd, bEnd } of checks) {
+          const aPt = a[aEnd];
+          const bPt = b[bEnd];
+          const dist = vecDist(aPt, bPt);
+          if (dist >= radius || dist < 1e-6) continue;
 
-        // Adjust a's origin: origin = mid ∓ axis * depth/2
-        // exit = origin + axis*(d/2) → origin = mid - axis*(d/2) when aEnd='exit'
-        // entry = origin - axis*(d/2) → origin = mid + axis*(d/2) when aEnd='entry'
-        const aSign = aEnd === 'exit' ? -1 : 1;
-        const newAOrigin = vecAdd(mid, vecScale(a.axis, aSign * a.depth / 2));
-        const aShift = vecDist(newAOrigin, a.elem.placement.origin);
-        if (aShift <= MAX_ADJUST) {
-          a.elem.placement.origin.x = newAOrigin.x;
-          a.elem.placement.origin.y = newAOrigin.y;
-          a.elem.placement.origin.z = newAOrigin.z;
-          a[aEnd] = { ...mid };
-          // Recompute the other end to stay consistent
-          a[aEnd === 'exit' ? 'entry' : 'exit'] = vecAdd(
-            a.elem.placement.origin,
-            vecScale(a.axis, (aEnd === 'exit' ? -1 : 1) * a.depth / 2)
-          );
+          // Snap to midpoint
+          const mid = {
+            x: (aPt.x + bPt.x) / 2,
+            y: (aPt.y + bPt.y) / 2,
+            z: (aPt.z + bPt.z) / 2,
+          };
+
+          // Adjust a's origin: origin = mid ∓ bearing * depth/2
+          const aSign = aEnd === 'exit' ? -1 : 1;
+          const newAOrigin = vecAdd(mid, vecScale(a.bearing, aSign * a.depth / 2));
+          const aShift = vecDist(newAOrigin, a.elem.placement.origin);
+          if (aShift <= MAX_ADJUST) {
+            a.elem.placement.origin.x = newAOrigin.x;
+            a.elem.placement.origin.y = newAOrigin.y;
+            a.elem.placement.origin.z = newAOrigin.z;
+            a[aEnd] = { ...mid };
+            a[aEnd === 'exit' ? 'entry' : 'exit'] = vecAdd(
+              a.elem.placement.origin,
+              vecScale(a.bearing, (aEnd === 'exit' ? -1 : 1) * a.depth / 2)
+            );
+            a.snapped = true;
+          }
+
+          // Adjust b's origin similarly
+          const bSign = bEnd === 'exit' ? -1 : 1;
+          const newBOrigin = vecAdd(mid, vecScale(b.bearing, bSign * b.depth / 2));
+          const bShift = vecDist(newBOrigin, b.elem.placement.origin);
+          if (bShift <= MAX_ADJUST) {
+            b.elem.placement.origin.x = newBOrigin.x;
+            b.elem.placement.origin.y = newBOrigin.y;
+            b.elem.placement.origin.z = newBOrigin.z;
+            b[bEnd] = { ...mid };
+            b[bEnd === 'exit' ? 'entry' : 'exit'] = vecAdd(
+              b.elem.placement.origin,
+              vecScale(b.bearing, (bEnd === 'exit' ? -1 : 1) * b.depth / 2)
+            );
+            b.snapped = true;
+          }
+
+          passSnapped++;
+          break; // Only one orientation can match per pair
         }
-
-        // Adjust b's origin similarly
-        const bSign = bEnd === 'exit' ? -1 : 1;
-        const newBOrigin = vecAdd(mid, vecScale(b.axis, bSign * b.depth / 2));
-        const bShift = vecDist(newBOrigin, b.elem.placement.origin);
-        if (bShift <= MAX_ADJUST) {
-          b.elem.placement.origin.x = newBOrigin.x;
-          b.elem.placement.origin.y = newBOrigin.y;
-          b.elem.placement.origin.z = newBOrigin.z;
-          b[bEnd] = { ...mid };
-          b[bEnd === 'exit' ? 'entry' : 'exit'] = vecAdd(
-            b.elem.placement.origin,
-            vecScale(b.axis, (bEnd === 'exit' ? -1 : 1) * b.depth / 2)
-          );
-        }
-
-        snapped++;
-        break; // Only one orientation can match per pair
       }
+    }
+
+    return passSnapped;
+  }
+
+  // Pass 1: High-confidence snap at 50mm
+  pass1Snapped = runSnapPass(SNAP_PASS_1, 'pass1', segData);
+
+  // Pass 2: Repair orphans at 150mm (only endpoints not already snapped)
+  pass2Snapped = runSnapPass(SNAP_PASS_2, 'pass2', segData);
+
+  const totalSnapped = pass1Snapped + pass2Snapped;
+  if (totalSnapped > 0) {
+    console.log(`snapTunnelSegmentEndpoints: Pass 1 (${SNAP_PASS_1 * 1000}mm) snapped ${pass1Snapped}, Pass 2 (${SNAP_PASS_2 * 1000}mm) snapped ${pass2Snapped}`);
+  }
+  if (!css.metadata) css.metadata = {};
+  css.metadata.tunnelEndpointSnapping = { pass1Snapped, pass2Snapped, totalSnapped };
+}
+
+// ============================================================================
+// JUNCTION CONSTRAINT SOLVER (migrated from generate lambda)
+// ============================================================================
+
+/**
+ * Find the 3D point closest to all bearing lines (least-squares).
+ *
+ * Each line is { px, py, pz, dx, dy, dz } where (px,py,pz) is a point on the
+ * line and (dx,dy,dz) is a unit direction vector.
+ *
+ * Solves: minimize Σ_i ||(I - D_i D_i^T)(X - P_i)||²
+ * Normal equation: (Σ M_i) X = Σ M_i P_i  where M_i = I - D_i D_i^T
+ *
+ * Returns { x, y, z } or null if degenerate (parallel/coincident lines).
+ */
+function solveJunctionPoint(lines) {
+  let a00 = 0, a01 = 0, a02 = 0, a11 = 0, a12 = 0, a22 = 0;
+  let b0 = 0, b1 = 0, b2 = 0;
+  for (const { px, py, pz, dx, dy, dz } of lines) {
+    const m00 = 1 - dx * dx;
+    const m01 = -dx * dy;
+    const m02 = -dx * dz;
+    const m11 = 1 - dy * dy;
+    const m12 = -dy * dz;
+    const m22 = 1 - dz * dz;
+    a00 += m00; a01 += m01; a02 += m02;
+    a11 += m11; a12 += m12; a22 += m22;
+    b0 += m00 * px + m01 * py + m02 * pz;
+    b1 += m01 * px + m11 * py + m12 * pz;
+    b2 += m02 * px + m12 * py + m22 * pz;
+  }
+  const det = a00 * (a11 * a22 - a12 * a12)
+            - a01 * (a01 * a22 - a12 * a02)
+            + a02 * (a01 * a12 - a11 * a02);
+  if (Math.abs(det) < 1e-6) return null;
+  const inv = 1 / det;
+  return {
+    x: inv * (b0 * (a11 * a22 - a12 * a12) - a01 * (b1 * a22 - a12 * b2) + a02 * (b1 * a12 - a11 * b2)),
+    y: inv * (a00 * (b1 * a22 - a12 * b2) - b0 * (a01 * a22 - a12 * a02) + a02 * (a01 * b2 - b1 * a02)),
+    z: inv * (a00 * (a11 * b2 - b1 * a12) - a01 * (a01 * b2 - b1 * a02) + b0 * (a01 * a12 - a11 * a02))
+  };
+}
+
+/**
+ * Junction constraint solver — close VentSim endpoint scatter at shared nodes.
+ *
+ * Migrated from generate lambda. Runs in the topology engine so that solved
+ * positions are available to all downstream stages (shell decomposition,
+ * path connections, bridge segments, etc.) rather than being computed too late
+ * in generate where shell pieces have already been placed from unsolved data.
+ *
+ * Algorithm:
+ *   1. Build junction graph: collect bearing lines per topology node
+ *   2. Per node: solve via least-squares line intersection (centroid fallback)
+ *   3. Move endpoints toward junction points:
+ *        - 2-way junctions (bends): direct snap
+ *        - 3+ way junctions (T/cross): bearing-project only (no lateral drift)
+ *   4. Recompute placement.origin, geometry.depth, properties.startPoint/endPoint
+ */
+function solveJunctionPositions(css) {
+  if (!css.elements || css.elements.length === 0) return;
+  if (!hasTunnelSegments(css)) return;
+
+  // Resolve bore direction — same logic as snapTunnelSegmentEndpoints
+  function getBearing(elem) {
+    const axis = elem.placement?.axis ? vecNormalize(elem.placement.axis) : null;
+    const refDir = elem.placement?.refDirection ? vecNormalize(elem.placement.refDirection) : null;
+    if (axis && Math.abs(axis.z) > 0.9 && refDir) return refDir;
+    if (axis) return axis;
+    if (refDir) return refDir;
+    return null;
+  }
+
+  const segments = [];
+  for (const elem of css.elements) {
+    if (elem.type !== 'TUNNEL_SEGMENT') continue;
+    if ((elem.properties?.branchClass || '') !== 'STRUCTURAL') continue;
+    const bearing = getBearing(elem);
+    if (!bearing) continue;
+    const o = elem.placement?.origin;
+    if (!o) continue;
+    const depth = elem.geometry?.depth || 0;
+    if (depth < 0.5) continue;
+
+    const entryNode = elem.properties?.entry_node;
+    const exitNode = elem.properties?.exit_node;
+    if (entryNode == null || exitNode == null) continue;
+
+    const entry = vecAdd(o, vecScale(bearing, -depth / 2));
+    const exit = vecAdd(o, vecScale(bearing, depth / 2));
+
+    segments.push({ elem, bearing, depth, entry, exit, entryNode: String(entryNode), exitNode: String(exitNode) });
+  }
+
+  if (segments.length < 2) return;
+
+  // STEP 1: Build junction graph — collect bearing lines per node
+  const nodeLines = {};  // nodeId → [{ segIdx, pathEnd, px, py, pz, dx, dy, dz }]
+  const origLengths = {};  // segIdx → original depth
+
+  for (let i = 0; i < segments.length; i++) {
+    const s = segments[i];
+    origLengths[i] = s.depth;
+    const bx = s.bearing.x, by = s.bearing.y, bz = s.bearing.z;
+
+    if (s.entryNode) {
+      if (!nodeLines[s.entryNode]) nodeLines[s.entryNode] = [];
+      nodeLines[s.entryNode].push({
+        segIdx: i, pathEnd: 'entry',
+        px: s.entry.x, py: s.entry.y, pz: s.entry.z,
+        dx: bx, dy: by, dz: bz
+      });
+    }
+    if (s.exitNode) {
+      if (!nodeLines[s.exitNode]) nodeLines[s.exitNode] = [];
+      nodeLines[s.exitNode].push({
+        segIdx: i, pathEnd: 'exit',
+        px: s.exit.x, py: s.exit.y, pz: s.exit.z,
+        dx: bx, dy: by, dz: bz
+      });
     }
   }
 
-  if (snapped > 0) {
-    console.log(`snapTunnelSegmentEndpoints: ${snapped} junction(s) snapped to exact shared coordinates`);
+  // STEP 2: Solve junction positions (per-node)
+  const junctionPts = {};  // nodeId → { x, y, z }
+  const fbNodes = new Set();
+  let solvedLS = 0, solvedFB = 0;
+
+  for (const [nodeId, lines] of Object.entries(nodeLines)) {
+    if (lines.length < 2) continue;
+
+    // Centroid fallback
+    const fbX = lines.reduce((s, l) => s + l.px, 0) / lines.length;
+    const fbY = lines.reduce((s, l) => s + l.py, 0) / lines.length;
+    const fbZ = lines.reduce((s, l) => s + l.pz, 0) / lines.length;
+
+    const pt = solveJunctionPoint(lines);
+    let useFallback = false;
+    if (!pt) {
+      useFallback = true;
+    } else {
+      for (const l of lines) {
+        const d = Math.sqrt((pt.x - l.px) ** 2 + (pt.y - l.py) ** 2 + (pt.z - l.pz) ** 2);
+        if (d > 50) { useFallback = true; break; }
+      }
+    }
+
+    if (useFallback) {
+      junctionPts[nodeId] = { x: fbX, y: fbY, z: fbZ };
+      fbNodes.add(nodeId);
+      solvedFB++;
+    } else {
+      junctionPts[nodeId] = pt;
+      solvedLS++;
+    }
   }
+
+  // STEP 3: Move endpoints toward junction points
+  const adjustments = {};  // `${segIdx}:${pathEnd}` → { x, y, z }
+  const edgeGaps = {};
+  let maxLenChange = 0, lenClamped = 0, directSnapped = 0;
+  const LENGTH_TOL = 0.20;
+
+  for (const [nodeId, jpt] of Object.entries(junctionPts)) {
+    const regs = nodeLines[nodeId] || [];
+    const is2Way = regs.length === 2;
+
+    for (const reg of regs) {
+      const origLen = origLengths[reg.segIdx] || 1;
+      let nx, ny, nz;
+
+      if (is2Way) {
+        // 2-way: direct snap to junction point (closes gap fully)
+        nx = jpt.x; ny = jpt.y; nz = jpt.z;
+        let shift = Math.sqrt((nx - reg.px) ** 2 + (ny - reg.py) ** 2 + (nz - reg.pz) ** 2);
+        const shiftMax = 0.40 * origLen;
+        if (shift > shiftMax && shift > 1e-6) {
+          const scale = shiftMax / shift;
+          nx = reg.px + (jpt.x - reg.px) * scale;
+          ny = reg.py + (jpt.y - reg.py) * scale;
+          nz = reg.pz + (jpt.z - reg.pz) * scale;
+          lenClamped++;
+        }
+        directSnapped++;
+      } else {
+        // 3+ way: bearing-project only (no lateral drift)
+        let t = (jpt.x - reg.px) * reg.dx + (jpt.y - reg.py) * reg.dy + (jpt.z - reg.pz) * reg.dz;
+        const tMax = LENGTH_TOL * origLen;
+        if (Math.abs(t) > tMax) { t = Math.sign(t) * tMax; lenClamped++; }
+        maxLenChange = Math.max(maxLenChange, Math.abs(t) / origLen * 100);
+        nx = reg.px + t * reg.dx;
+        ny = reg.py + t * reg.dy;
+        nz = reg.pz + t * reg.dz;
+      }
+
+      adjustments[`${reg.segIdx}:${reg.pathEnd}`] = { x: nx, y: ny, z: nz };
+
+      // Residual gap
+      const gx = jpt.x - nx, gy = jpt.y - ny, gz = jpt.z - nz;
+      const gmag = Math.sqrt(gx * gx + gy * gy + gz * gz);
+      const ek = segments[reg.segIdx].elem.element_key || segments[reg.segIdx].elem.id || '';
+      edgeGaps[`${nodeId}:${ek}:${reg.pathEnd}`] = gmag;
+    }
+  }
+
+  // STEP 4: Apply adjustments — recompute placement from solved endpoints
+  const affectedSegs = new Set();
+  for (const key of Object.keys(adjustments)) {
+    affectedSegs.add(parseInt(key.split(':')[0]));
+  }
+
+  let recomputed = 0;
+  let maxOriginShift = 0;
+
+  for (const idx of affectedSegs) {
+    const s = segments[idx];
+    const entryAdj = adjustments[`${idx}:entry`];
+    const exitAdj = adjustments[`${idx}:exit`];
+    const ep0 = entryAdj || s.entry;
+    const ep1 = exitAdj || s.exit;
+
+    const dx = ep1.x - ep0.x, dy = ep1.y - ep0.y, dz = ep1.z - ep0.z;
+    const newLen = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (newLen < 0.5) {
+      console.log(`  WARNING: segment ${idx} degenerate after junction solve (len=${newLen.toFixed(3)}m)`);
+      continue;
+    }
+
+    const bx = dx / newLen, by = dy / newLen, bz = dz / newLen;
+    const mx = (ep0.x + ep1.x) / 2, my = (ep0.y + ep1.y) / 2, mz = (ep0.z + ep1.z) / 2;
+
+    const oldO = s.elem.placement.origin;
+    const shift = Math.sqrt((mx - oldO.x) ** 2 + (my - oldO.y) ** 2 + (mz - oldO.z) ** 2);
+    maxOriginShift = Math.max(maxOriginShift, shift);
+
+    // Update placement
+    s.elem.placement.origin = { x: mx, y: my, z: mz };
+    s.elem.placement.refDirection = { x: bx, y: by, z: bz };
+    if (!s.elem.placement.axis) s.elem.placement.axis = { x: 0, y: 0, z: 1 };
+
+    // Update geometry
+    if (!s.elem.geometry) s.elem.geometry = {};
+    s.elem.geometry.depth = newLen;
+    s.elem.geometry.direction = { x: bx, y: by, z: bz };
+
+    // Update geometry.path
+    s.elem.geometry.path = [
+      { x: ep0.x, y: ep0.y, z: ep0.z },
+      { x: ep1.x, y: ep1.y, z: ep1.z }
+    ];
+
+    // Update properties.startPoint/endPoint so generate's VentSim re-placement
+    // produces the same solved coordinates (keeps both in sync).
+    if (!s.elem.properties) s.elem.properties = {};
+    s.elem.properties.startPoint = { x: ep0.x, y: ep0.y, z: ep0.z };
+    s.elem.properties.endPoint = { x: ep1.x, y: ep1.y, z: ep1.z };
+
+    recomputed++;
+  }
+
+  if (solvedLS || solvedFB) {
+    console.log(`Junction solver (topology): ${solvedLS} nodes solved (least-squares), `
+      + `${solvedFB} nodes solved (centroid fallback), `
+      + `${directSnapped} endpoints direct-snapped (2-way junctions)`);
+  }
+  if (recomputed) {
+    const gapMags = Object.values(edgeGaps);
+    const avgGap = gapMags.length ? gapMags.reduce((a, b) => a + b, 0) / gapMags.length : 0;
+    const maxGap = gapMags.length ? Math.max(...gapMags) : 0;
+    console.log(`Junction solver applied: ${recomputed} segments recomputed, `
+      + `max origin shift=${maxOriginShift.toFixed(2)}m, `
+      + `max length change=${maxLenChange.toFixed(1)}%, `
+      + `${lenClamped} endpoints length-clamped`);
+    console.log(`  Residual edge gaps: avg=${avgGap.toFixed(2)}m, max=${maxGap.toFixed(2)}m `
+      + `(${gapMags.length} edges)`);
+  }
+
   if (!css.metadata) css.metadata = {};
-  css.metadata.tunnelEndpointSnapping = { snapped };
+  css.metadata.junctionSolver = { solvedLS, solvedFB, directSnapped, recomputed, maxOriginShift, lenClamped };
+}
+
+/**
+ * Phase 6D.1 P2 — host-shell trim at multi-way junctions.
+ *
+ * Shortens every TUNNEL_SEGMENT end that meets another segment at the same
+ * topology node by `trimRadiusM` along the segment's bearing. Generate's CSG
+ * filler hulls then occupy the void at the joint instead of stacking on top
+ * of the original shell.
+ *
+ * Runs AFTER solveJunctionPositions so endpoints are at canonical joint
+ * positions before retraction. Applies to STRUCTURAL segments only.
+ *
+ * Mutates: placement.origin, placement.refDirection, geometry.depth,
+ * geometry.path, properties.startPoint/endPoint.
+ *
+ * Skips a trim if the resulting depth would fall below `minDepthM` (default
+ * 0.5m) — keeps short stubs intact instead of collapsing them.
+ */
+function trimSegmentsAtJunctions(css, trimRadiusM = 0.5, minDepthM = 0.5) {
+  if (!css.elements || css.elements.length === 0) return;
+  if (!hasTunnelSegments(css)) return;
+  if (!Number.isFinite(trimRadiusM) || trimRadiusM <= 0) return;
+
+  function getBearing(elem) {
+    const axis = elem.placement?.axis ? vecNormalize(elem.placement.axis) : null;
+    const refDir = elem.placement?.refDirection ? vecNormalize(elem.placement.refDirection) : null;
+    if (axis && Math.abs(axis.z) > 0.9 && refDir) return refDir;
+    if (axis) return axis;
+    if (refDir) return refDir;
+    return null;
+  }
+
+  const segments = [];
+  for (const elem of css.elements) {
+    if (elem.type !== 'TUNNEL_SEGMENT') continue;
+    if ((elem.properties?.branchClass || '') !== 'STRUCTURAL') continue;
+    const bearing = getBearing(elem);
+    if (!bearing) continue;
+    const o = elem.placement?.origin;
+    if (!o) continue;
+    const depth = elem.geometry?.depth || 0;
+    if (depth < minDepthM + 2 * trimRadiusM) continue;
+    const entryNode = elem.properties?.entry_node;
+    const exitNode = elem.properties?.exit_node;
+    if (entryNode == null && exitNode == null) continue;
+
+    const entry = vecAdd(o, vecScale(bearing, -depth / 2));
+    const exit  = vecAdd(o, vecScale(bearing,  depth / 2));
+    segments.push({
+      elem, bearing, depth, entry, exit,
+      entryNode: entryNode != null ? String(entryNode) : null,
+      exitNode:  exitNode  != null ? String(exitNode)  : null,
+    });
+  }
+  if (segments.length < 2) return;
+
+  // Build node → segment-count map. A node is a "junction" iff ≥ 2 segments
+  // meet there (covers 2-way bends and 3+ way intersections).
+  const nodeCounts = {};
+  for (const s of segments) {
+    if (s.entryNode) nodeCounts[s.entryNode] = (nodeCounts[s.entryNode] || 0) + 1;
+    if (s.exitNode)  nodeCounts[s.exitNode]  = (nodeCounts[s.exitNode]  || 0) + 1;
+  }
+
+  let endsTrimmed = 0;
+  let segmentsTouched = 0;
+  let skippedTooShort = 0;
+
+  for (const s of segments) {
+    const trimEntry = s.entryNode && (nodeCounts[s.entryNode] || 0) >= 2;
+    const trimExit  = s.exitNode  && (nodeCounts[s.exitNode]  || 0) >= 2;
+    if (!trimEntry && !trimExit) continue;
+
+    const totalTrim = (trimEntry ? trimRadiusM : 0) + (trimExit ? trimRadiusM : 0);
+    if (s.depth - totalTrim < minDepthM) {
+      skippedTooShort++;
+      continue;
+    }
+
+    const newEntry = trimEntry
+      ? vecAdd(s.entry, vecScale(s.bearing,  trimRadiusM))
+      : { x: s.entry.x, y: s.entry.y, z: s.entry.z };
+    const newExit = trimExit
+      ? vecAdd(s.exit,  vecScale(s.bearing, -trimRadiusM))
+      : { x: s.exit.x,  y: s.exit.y,  z: s.exit.z  };
+
+    const dx = newExit.x - newEntry.x;
+    const dy = newExit.y - newEntry.y;
+    const dz = newExit.z - newEntry.z;
+    const newLen = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (newLen < minDepthM) { skippedTooShort++; continue; }
+
+    const bx = dx / newLen, by = dy / newLen, bz = dz / newLen;
+    const mx = (newEntry.x + newExit.x) / 2;
+    const my = (newEntry.y + newExit.y) / 2;
+    const mz = (newEntry.z + newExit.z) / 2;
+
+    s.elem.placement.origin = { x: mx, y: my, z: mz };
+    s.elem.placement.refDirection = { x: bx, y: by, z: bz };
+    if (!s.elem.placement.axis) s.elem.placement.axis = { x: 0, y: 0, z: 1 };
+
+    if (!s.elem.geometry) s.elem.geometry = {};
+    s.elem.geometry.depth = newLen;
+    s.elem.geometry.direction = { x: bx, y: by, z: bz };
+    s.elem.geometry.path = [
+      { x: newEntry.x, y: newEntry.y, z: newEntry.z },
+      { x: newExit.x,  y: newExit.y,  z: newExit.z  },
+    ];
+    if (!s.elem.properties) s.elem.properties = {};
+    s.elem.properties.startPoint = { x: newEntry.x, y: newEntry.y, z: newEntry.z };
+    s.elem.properties.endPoint   = { x: newExit.x,  y: newExit.y,  z: newExit.z  };
+    s.elem.properties.junctionTrimMeters = trimRadiusM;
+    s.elem.properties.junctionTrimEnds = (trimEntry ? 'entry' : '')
+      + (trimEntry && trimExit ? '+' : '')
+      + (trimExit ? 'exit' : '');
+    // Record the pre-trim joint position(s) so the generate lambda's CSG
+    // cluster builder can recover the canonical junction centre (averaging
+    // post-trim endpoints would give a point offset from the bisector).
+    s.elem.properties.preTrimJointStart = trimEntry
+      ? { x: s.entry.x, y: s.entry.y, z: s.entry.z }
+      : null;
+    s.elem.properties.preTrimJointEnd = trimExit
+      ? { x: s.exit.x,  y: s.exit.y,  z: s.exit.z  }
+      : null;
+
+    if (trimEntry) endsTrimmed++;
+    if (trimExit)  endsTrimmed++;
+    segmentsTouched++;
+  }
+
+  if (segmentsTouched > 0 || skippedTooShort > 0) {
+    console.log(`trimSegmentsAtJunctions: trimRadius=${trimRadiusM}m `
+      + `segments_trimmed=${segmentsTouched} ends_trimmed=${endsTrimmed} `
+      + `skipped_too_short=${skippedTooShort}`);
+  }
+
+  if (!css.metadata) css.metadata = {};
+  css.metadata.junctionTrim = {
+    trimRadiusM, segmentsTouched, endsTrimmed, skippedTooShort,
+  };
 }

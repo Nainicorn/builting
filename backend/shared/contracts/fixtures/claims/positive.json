@@ -1,0 +1,78 @@
+{
+  "_category": "positive",
+  "_description": "Minimal valid claims.json: single wall claim from a DXF source.",
+  "claimsVersion": "1.0",
+  "domain": "TUNNEL",
+  "facilityMeta": {
+    "name": "Test Tunnel",
+    "type": "tunnel",
+    "description": null,
+    "units": "M",
+    "origin": { "x": 0, "y": 0, "z": 0 },
+    "axes": "RIGHT_HANDED_Z_UP"
+  },
+  "claims": [
+    {
+      "claim_id": "c-0001",
+      "kind": "wall_candidate",
+      "subject_local_id": "wall-1",
+      "attributes": {
+        "placement": { "origin": { "x": 0, "y": 0, "z": 0 } },
+        "geometry": { "depth": 5.0 }
+      },
+      "status": "asserted",
+      "alternatives": [],
+      "requires_review": false,
+      "evidence": [
+        {
+          "source": "tunnel-plan.dxf",
+          "sourceRole": "DRAWING",
+          "extractionMethod": "DXF_PARSER",
+          "coordinateSource": "DIRECT_2D",
+          "authority": "DEFAULT",
+          "excerpt": null,
+          "page": null,
+          "region": null,
+          "sheetName": null,
+          "dxfLayer": "WALLS",
+          "dxfHandle": "1A2B",
+          "sheetRole": null,
+          "coordinateDerivation": "direct",
+          "scaleConfidence": null,
+          "drawingMetadata": null
+        }
+      ],
+      "confidence": 0.85,
+      "fieldConfidence": { "placement": 0.9, "geometry": 0.8 },
+      "aliases": [],
+      "source_revision_hint": null,
+      "discipline": "structural",
+      "parserVersion": "1.0",
+      "provenance": {
+        "sourceFile": "tunnel-plan.dxf",
+        "sourceFileStatus": "direct",
+        "sourceFiles": ["tunnel-plan.dxf"],
+        "stage": "extract",
+        "modifications": []
+      }
+    }
+  ],
+  "sourceManifest": [
+    {
+      "name": "tunnel-plan.dxf",
+      "parseStatus": "success",
+      "sourceRole": "DRAWING",
+      "claimCount": 1,
+      "geometryContributor": true
+    }
+  ],
+  "extractionReport": {
+    "totalClaims": 1,
+    "byKind": { "wall_candidate": 1 },
+    "bySource": { "DXF_PARSER": 1 },
+    "confidenceDistribution": { "high": 1, "medium": 0, "low": 0 },
+    "parseErrors": [],
+    "ambiguousClaims": 0,
+    "unresolvedClaims": 0
+  }
+}

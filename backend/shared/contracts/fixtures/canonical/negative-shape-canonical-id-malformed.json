@@ -1,0 +1,41 @@
+{
+  "_category": "shape",
+  "_failureReason": "canonical_id pattern is canon-<12 hex chars>; 'not-a-canon-id' fails the regex on both validators.",
+  "schemaVersion": "2.0",
+  "layer": "canonical_observed",
+  "domain": "TUNNEL",
+  "facility": null,
+  "observations": [
+    {
+      "observation_id": "obs-0001",
+      "canonical_id": "not-a-canon-id",
+      "instance_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+      "source_claim_ids": ["c-0001"],
+      "observation_type": "linear_feature",
+      "observation_status": "accepted",
+      "candidate_class": "wall",
+      "candidate_class_source": "parser_heuristic",
+      "geometry_evidence": {
+        "curves": [], "points": [], "profiles": [], "rawCoordinates": [],
+        "dimensions": {}
+      },
+      "semantic_evidence": {
+        "labels": [], "tags": [], "properties": {}, "materials": []
+      },
+      "context_evidence": {
+        "containerHints": [], "adjacencyHints": [], "hostHints": [], "systemHints": []
+      },
+      "confidence": 0.85,
+      "provenance": {
+        "basis": ["DXF_PARSER"],
+        "coordinateSource": "DIRECT_2D",
+        "sourceFiles": ["x.dxf"]
+      }
+    }
+  ],
+  "metadata": {
+    "claimsConsumed": 1,
+    "observationsProduced": 1,
+    "rejectedClaims": 0
+  }
+}

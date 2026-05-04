@@ -2,3 +2,5 @@ ifcopenshell
 boto3
 trimesh
 numpy
+manifold3d
+scipy

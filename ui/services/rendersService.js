@@ -26,6 +26,11 @@ const rendersService = {
     return await aws.call(`/api/renders/${renderId}/report`, { method: 'GET' });
   },
 
+  // Alias used by pipeline trace polling — returns { report, pipelineTrace }
+  async getReport(renderId) {
+    return await aws.call(`/api/renders/${renderId}/report`, { method: 'GET' });
+  },
+
   async retryRender(renderId) {
     return await aws.call(`/api/renders/${renderId}/retry`, { method: 'POST' });
   },
@@ -35,6 +40,10 @@ const rendersService = {
       method: 'POST',
       body: JSON.stringify({ refinement })
     });
+  },
+
+  async getDiagnosticsUrl(renderId) {
+    return await aws.call(`/api/renders/${renderId}/diagnostics`, { method: 'GET' });
   }
 };
 

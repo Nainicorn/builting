@@ -1,5 +1,5 @@
 body {
-    background: #000000;
+    background: var(--bg-base);
     font-family: var(--font-family);
     color: var(--text-primary);
     height: 100vh;
@@ -10,95 +10,67 @@ body {
     display: flex;
     flex-direction: column;
     height: 100vh;
-    position: relative;
-    background: #000000;
-}
-
-.__login-branding {
-    margin-bottom: 1.25rem;
-    display: flex;
-    justify-content: center;
     align-items: center;
-}
-
-.__brand-name {
-    font-size: 2rem;
-    font-weight: 400;
-    color: var(--text-primary);
-    letter-spacing: 0.2em;
-    text-transform: uppercase;
-}
-
-.__brand-subtitle {
-    font-size: var(--font-size-xs);
-    color: var(--text-muted);
-    letter-spacing: 0.08em;
-    font-weight: 400;
-    text-transform: uppercase;
+    justify-content: center;
+    /* Very faint radial glow centered — professional, not decorative */
+    background-image: radial-gradient(
+        ellipse 60% 50% at 50% 55%,
+        rgba(139, 124, 246, 0.04) 0%,
+        transparent 70%
+    );
 }
 
 .__login-main {
     display: flex;
     flex-direction: column;
-    justify-content: center;
     align-items: center;
-    flex: 1;
+    width: 100%;
+    max-width: 340px;
+    padding: 0 24px;
 }
 
-.__login-body {
-    background: var(--bg-surface);
-    padding: 2.5rem;
-    border-radius: 2px;
-    width: 90%;
-    max-width: 380px;
-    border: 1px solid var(--border-subtle);
-    border-left: 3px solid var(--accent);
-    position: relative;
-    box-shadow:
-        0 2px 4px rgba(0, 0, 0, 0.6),
-        0 8px 24px rgba(0, 0, 0, 0.7),
-        0 0 0 1px rgba(250, 82, 15, 0.06),
-        0 32px 64px rgba(0, 0, 0, 0.8);
+/* ─── Branding ─── */
+.__login-branding {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 48px;
 }
 
-/* Orange-to-steel gradient identity bar */
-.__login-body::after {
-    content: '';
-    position: absolute;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    height: 3px;
-    background: linear-gradient(90deg, #fa520f 0%, #fb6424 30%, #223044 65%, #131a24 100%);
+.__login-logo {
+    width: 36px;
+    height: 40px;
+    color: var(--accent);
+    opacity: 0.9;
 }
 
-.__login-title {
-    font-size: 1.375rem;
-    font-weight: 400;
-    text-align: center;
-    margin-bottom: 1.75rem;
-    color: var(--text-primary);
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
+.__brand-name {
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    color: var(--text-secondary);
 }
 
+/* ─── Form ─── */
 .__login-form {
     display: flex;
     flex-direction: column;
-    gap: 0.875rem;
+    gap: 10px;
     width: 100%;
 }
 
 .__login-input {
-    height: 44px;
-    padding: 0 0.875rem;
-    background: #000000;
+    height: 42px;
+    padding: 0 14px;
+    background: var(--bg-elevated);
     border: 1px solid var(--border-default);
-    border-radius: 2px;
+    border-radius: var(--radius-md);
     font-size: var(--font-size-base);
     color: var(--text-primary);
     transition: border-color var(--transition), box-shadow var(--transition);
     font-family: var(--font-family);
+    width: 100%;
 }
 
 .__login-input::placeholder {
@@ -112,24 +84,19 @@ body {
 }
 
 .__login-button {
-    height: 44px;
-    border-radius: 2px;
+    height: 42px;
+    border-radius: var(--radius-md);
     background: var(--accent);
-    color: #ffffff;
+    color: #fff;
     border: none;
     cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.5rem;
-    transition: all var(--transition);
-    font-weight: 400;
-    font-size: var(--font-size-base);
+    font-weight: 600;
+    font-size: var(--font-size-sm);
     font-family: var(--font-family);
-    flex-shrink: 0;
-    margin-top: 0.25rem;
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
+    letter-spacing: 0.02em;
+    transition: background var(--transition), opacity var(--transition);
+    margin-top: 6px;
+    width: 100%;
 }
 
 .__login-button:hover {
@@ -141,45 +108,22 @@ body {
 }
 
 .__login-button:disabled {
-    opacity: 0.4;
+    opacity: 0.35;
     cursor: not-allowed;
 }
 
-.__login-icon {
-    width: 18px;
-    height: 18px;
-}
-
+/* ─── Error ─── */
 .__error-message {
     color: var(--status-error);
     font-size: var(--font-size-xs);
     text-align: center;
     min-height: 1.25rem;
-    margin-top: 0.5rem;
+    margin-top: 14px;
+    width: 100%;
 }
 
-.__login-footer {
-    position: absolute;
-    bottom: 2rem;
-    left: 0;
-    right: 0;
-    text-align: center;
-    z-index: 10;
-}
-
-.__login-credit {
-    font-size: var(--font-size-xs);
-    color: var(--text-muted);
-    letter-spacing: 0.06em;
-}
-
-@media (max-width: 640px) {
-    .__login-body {
-        padding: 2rem;
-    }
-
-    .__login-title {
-        font-size: 1.125rem;
-        margin-bottom: 1.5rem;
+@media (max-width: 400px) {
+    .__login-main {
+        padding: 0 20px;
     }
 }

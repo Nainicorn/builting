@@ -1,0 +1,8 @@
+FLOOR PLAN — NORTHFIELD OFFICE BUILDING
+Level 1
+
+Rooms:
+- Room-101: Open office, 6.0m wide x 5.0m deep x 3.0m high
+  Location: grid A1, lower-left corner at (0.0, 0.0, 0.0)
+  Walls: north wall at y=5.0, south wall at y=0.0, east wall at x=6.0, west wall at x=0.0
+  Floor elevation: 0.0m, ceiling: 3.0m

@@ -161,15 +161,23 @@ function buildCenterlineSkeleton(css) {
 
     const placement = seg.placement || {};
     const geometry = seg.geometry || {};
-    const axis = vecNormalize(placement.axis);
-    if (!axis) continue;
 
     const origin = placement.origin || { x: 0, y: 0, z: 0 };
     const depth = geometry.depth || 0;
     if (depth <= 0) continue;
 
-    const entryPoint = vecAdd(origin, vecScale(axis, -depth / 2));
-    const exitPoint = vecAdd(origin, vecScale(axis, depth / 2));
+    // R: Use actual bore bearing — normalize(endPoint - startPoint) — rather than
+    // placement.axis. Old-format VentSim CSS uses axis=(0,0,1) (Z-up) with
+    // refDirection=bore, so vecNormalize(placement.axis) gives (0,0,1) and produces
+    // vertically-oriented entry/exit points. That makes identifyAndMergeRuns compute
+    // mergedAxis=(0,0,1), and decomposeMergedRuns emits shell pieces extruded
+    // vertically (tall spike panels at every segment). getTunnelBearing returns the
+    // correct horizontal bore direction for old-format and the axis directly for new-format.
+    const bearing = getTunnelBearing(seg);
+    if (!bearing) continue;
+
+    const entryPoint = vecAdd(origin, vecScale(bearing, -depth / 2));
+    const exitPoint = vecAdd(origin, vecScale(bearing, depth / 2));
 
     const entryNode = seg.properties?.entry_node;
     const exitNode = seg.properties?.exit_node;
@@ -180,7 +188,7 @@ function buildCenterlineSkeleton(css) {
     const H = profile.height || 0;
 
     edges[key] = {
-      segKey: key, entryNode, exitNode, axis, depth, origin,
+      segKey: key, entryNode, exitNode, axis: bearing, depth, origin,
       W, H, profile: { ...profile },
       refDirection: placement.refDirection ? { ...placement.refDirection } : null,
       container: seg.container, material: seg.material, source: seg.source,
@@ -536,6 +544,7 @@ function decomposeMergedRuns(css) {
       pieces = [
         ['left_wall', 'WALL', 'IfcWall', vecScale(side, -(W / 2 - t / 2)), t, H, side, 0.92, {}],
         ['right_wall', 'WALL', 'IfcWall', vecScale(side, (W / 2 - t / 2)), t, H, side, 0.92, {}],
+        ['floor', 'SLAB', 'IfcSlab', vecScale(up, -(H / 2 - t / 2)), slabW, t, side, 0.92, { slabType: 'FLOOR' }],
         ['roof', 'SLAB', 'IfcSlab', vecScale(up, (H / 2 - t / 2)), slabW, t, side, 0.92, { slabType: 'ROOF' }],
       ];
     }
@@ -609,7 +618,10 @@ function decomposeMergedRuns(css) {
     const placement = seg.placement || {};
     const geometry = seg.geometry || {};
     const profile = geometry.profile || {};
-    const axis = vecNormalize(placement.axis);
+    // R: Same fix as buildCenterlineSkeleton — use bore bearing, not placement.axis.
+    // Old-format VentSim: placement.axis=(0,0,1), so vecNormalize gives (0,0,1) and
+    // the void space extrudes vertically (giant transparent spike). Use bore direction instead.
+    const axis = getTunnelBearing(seg) || vecNormalize(placement.axis);
     if (!axis) continue;
 
     const W = profile.width || 0;
@@ -640,12 +652,13 @@ function decomposeMergedRuns(css) {
       voidProfile = { type: 'RECTANGLE', width: innerW, height: innerH };
     }
 
-    // R3: Use stable frame for void placement
+    // R3: Use stable frame for void placement — now with correct bore axis
     const segDepth = geometry.depth || 0;
     const segOrigin = placement.origin || { x: 0, y: 0, z: 0 };
     const segStart = vecAdd(segOrigin, vecScale(axis, -segDepth / 2));
     const segEnd = vecAdd(segOrigin, vecScale(axis, segDepth / 2));
-    const voidFrame = buildTunnelFrame(segStart, segEnd, placement.refDirection ? vecNormalize(placement.refDirection) : null);
+    // preferredUp=null: tangent is now the bore (not vertical), so world-up (0,0,1) is the correct up candidate
+    const voidFrame = buildTunnelFrame(segStart, segEnd, null);
     const side = voidFrame ? voidFrame.lateral : vecNormalize(vecCross(axis, { x: 0, y: 0, z: 1 }));
 
     const voidGeometry = {
@@ -745,6 +758,11 @@ function decomposeMergedRuns(css) {
   }
 
   // Append derived elements
+  for (const de of derivedElements) {
+    if (!de.provenance) {
+      de.provenance = { sourceFile: null, sourceFileStatus: 'derived_geometric', sourceFiles: [], stage: 'topology:decomposeTunnelShell', modifications: [] };
+    }
+  }
   css.elements.push(...derivedElements);
 
   if (!css.metadata) css.metadata = {};
@@ -1127,6 +1145,11 @@ function generateJunctionFills(css) {
     }
   }
 
+  for (const fe of fillElements) {
+    if (!fe.provenance) {
+      fe.provenance = { sourceFile: null, sourceFileStatus: 'derived_geometric', sourceFiles: [], stage: 'topology:generateJunctionTransitions', modifications: [] };
+    }
+  }
   css.elements.push(...fillElements);
 
   if (!css.metadata) css.metadata = {};
@@ -1210,8 +1233,10 @@ function decomposeTunnelShell(css) {
       const placement = elem.placement || {};
       const geometry = elem.geometry || {};
       if (props.branchClass === 'STRUCTURAL' && geometry.profile?.type === 'RECTANGLE') {
+        // Always use ARCH for structural segments — IfcRectangleHollowProfileDef
+        // crashes web-ifc WASM parser. Use low curveRatio for rectangular shapes.
         geometry.profile.type = 'ARCH';
-        geometry.profile.curveRatio = 0.3;
+        geometry.profile.curveRatio = props.shape === 'rectangular' ? 0.01 : 0.3;
       }
 
       // F4: Populate geometry.path from entry/exit points so the element
@@ -1255,7 +1280,10 @@ function decomposeTunnelShell(css) {
       usedDefaultThickness = false;
     }
 
-    if (shape !== 'rectangular' && profileType !== 'RECTANGLE') {
+    // A1 fix: skip normalization if profile is already ARCH (set by applyTextDerivedHeights).
+    // Previously, non-fallback segments with ARCH profile (horseshoe tunnel) had it overwritten
+    // to RECTANGLE here, causing one segment to render as a flat box instead of arch cross-section.
+    if (shape !== 'rectangular' && profileType !== 'RECTANGLE' && profileType !== 'ARCH') {
       const profile = elem.geometry?.profile || {};
       if (profile.radius && profile.radius > 0) {
         const diameter = profile.radius * 2;
@@ -1323,12 +1351,16 @@ function decomposeTunnelShell(css) {
     elem.properties.decompositionMethod = isApproximated
       ? `SEMANTIC_${approximationType || 'CURVED'}` : 'SEMANTIC_RECTANGULAR';
 
-    // Apply arch profile to eligible structural segments so the generator uses
-    // IfcArbitraryProfileDefWithVoids (hollow horseshoe arch) instead of 4-panel
-    // rectangular decomposition. Produces curved ceiling visible from interior
-    // and cleaner junction overlap geometry (one tube vs. 4 separate panel edges).
-    if (props.branchClass === 'STRUCTURAL' && (elem.geometry?.profile?.type || 'RECTANGLE') === 'RECTANGLE') {
-      elem.geometry.profile = { ...(elem.geometry.profile || {}), type: 'ARCH', curveRatio: 0.3 };
+    // A1 fix (secondary guard): if applyTextDerivedHeights did not run (no DOCX shape data)
+    // but the segment is non-rectangular (horseshoe/arch facility), set ARCH with curveRatio=0.3
+    // so generate renders the correct arch cross-section instead of a flat rectangular box.
+    // This mirrors the SEGMENT_FALLBACK ARCH assignment above for eligible (non-fallback) segments.
+    const _finalProfileType = elem.geometry?.profile?.type || 'RECTANGLE';
+    if (_finalProfileType === 'RECTANGLE' && shape !== 'rectangular') {
+      if (elem.geometry?.profile) {
+        elem.geometry.profile.type = 'ARCH';
+        elem.geometry.profile.curveRatio = 0.3;
+      }
     }
 
     // Backfill geometry.path from frame if not present
@@ -1608,6 +1640,11 @@ function auditShellCompleteness(css) {
   }
 
   if (reconstructed.length > 0) {
+    for (const re of reconstructed) {
+      if (!re.provenance) {
+        re.provenance = { sourceFile: null, sourceFileStatus: 'derived_geometric', sourceFiles: [], stage: 'topology:auditShellCompleteness', modifications: [] };
+      }
+    }
     css.elements.push(...reconstructed);
   }
 
@@ -2224,6 +2261,11 @@ function mergeShellRuns(css) {
   }
 
   if (mergedElements.length > 0) {
+    for (const me of mergedElements) {
+      if (!me.provenance) {
+        me.provenance = { sourceFile: null, sourceFileStatus: 'derived_geometric', sourceFiles: [], stage: 'topology:mergeShellRuns', modifications: [] };
+      }
+    }
     css.elements.push(...mergedElements);
   }
 
@@ -2649,6 +2691,11 @@ function generateJunctionTransitions(css) {
   }
 
   if (transitionElements.length > 0) {
+    for (const te of transitionElements) {
+      if (!te.provenance) {
+        te.provenance = { sourceFile: null, sourceFileStatus: 'derived_geometric', sourceFiles: [], stage: 'topology:generateJunctionTransitions', modifications: [] };
+      }
+    }
     css.elements.push(...transitionElements);
   }
 
@@ -3121,6 +3168,11 @@ function auditOrphansAndBridgeGaps(css) {
     }
   }
 
+  for (const pa of proxiesAdded) {
+    if (!pa.provenance) {
+      pa.provenance = { sourceFile: null, sourceFileStatus: 'derived_inferred', sourceFiles: [], stage: 'topology:auditOrphansAndBridgeGaps', modifications: [] };
+    }
+  }
   css.elements.push(...proxiesAdded);
   if (!css.metadata) css.metadata = {};
   css.metadata.orphanAudit = {
@@ -3241,6 +3293,7 @@ function generatePortalEndWalls(css) {
         geometryExportable: true,
         generatedBy: 'PORTAL_END_WALL'
       },
+      provenance: { sourceFile: null, sourceFileStatus: 'derived_geometric', sourceFiles: [], stage: 'topology:generatePortalEndWalls', modifications: [] },
       relationships: []
     };
 
@@ -3253,4 +3306,4 @@ function generatePortalEndWalls(css) {
   }
 }
 
-export { decomposeTunnelShell, auditShellCompleteness, computeClosureTargets, alignShellContinuity, extendShellAtJunctions, mergeShellRuns, generateJunctionTransitions, validateTunnelGeometry, auditGeometryGaps, auditVisualGeometryQuality, auditOrphansAndBridgeGaps, generatePortalEndWalls };
+export { decomposeTunnelShell, buildCenterlineSkeleton, identifyAndMergeRuns, decomposeMergedRuns, auditShellCompleteness, computeClosureTargets, alignShellContinuity, extendShellAtJunctions, mergeShellRuns, generateJunctionTransitions, validateTunnelGeometry, auditGeometryGaps, auditVisualGeometryQuality, auditOrphansAndBridgeGaps, generatePortalEndWalls };

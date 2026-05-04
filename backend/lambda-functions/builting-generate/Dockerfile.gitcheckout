@@ -1,0 +1,21 @@
+FROM continuumio/miniconda3:latest
+
+RUN apt-get update && apt-get install -y curl wget ca-certificates git && rm -rf /var/lib/apt/lists/*
+
+RUN conda create -y -n lambda -c conda-forge python=3.11 ifcopenshell lark scipy && conda clean -a -y
+
+RUN /opt/conda/envs/lambda/bin/pip install --no-cache-dir awslambdaric boto3 trimesh numpy lark-parser scipy
+
+ENV LAMBDA_TASK_ROOT=/var/task
+WORKDIR /tmp/repo
+
+RUN git clone --depth 1 https://github.com/nainicorn/text-to-3d.git . && git fetch origin 2ce3987 && git checkout 2ce3987
+
+RUN cp lambda_function.py ${LAMBDA_TASK_ROOT}/ && cp -r lambda_package ${LAMBDA_TASK_ROOT}/
+
+WORKDIR ${LAMBDA_TASK_ROOT}
+ENV PATH=/opt/conda/envs/lambda/bin:$PATH
+ENV PYTHONPATH=${LAMBDA_TASK_ROOT}:/opt/conda/envs/lambda/lib/python3.11/site-packages
+
+ENTRYPOINT [ "/opt/conda/envs/lambda/bin/python", "-m", "awslambdaric" ]
+CMD [ "lambda_function.handler" ]

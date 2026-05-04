@@ -2,6 +2,8 @@
 
 > Unstructured data in. IFC 3D model out.
 
+> **Note for reviewers / debug helpers**: This is a snapshot of the in-progress codebase shared for a second pair of eyes. The active issue list and current pipeline phase live in `CLAUDE.md` (see "Pipeline Engineering Principles" + the project memory in `.claude/projects/.../memory/`). The reference target IFC for tunnel renders is `sample/final.ifc`. Backend lambdas under `backend/lambda-functions/` are the most active surface area — `builting-extract`, `builting-resolve`, `builting-topology-engine`, and `builting-generate` are where most current work is happening. Lambda zips, layer artifacts, and `node_modules` are gitignored — run `npm install` in the repo root and inside each lambda dir before working locally.
+
 **builting** is a full-stack AI pipeline that transforms raw, unstructured building data — text descriptions, PDFs, blueprints, images — into production-grade IFC 3D models viewable directly in the browser or downloadable for use in tools like Revit.
 
 The goal: give anyone the ability to generate a digital twin of a building or structure without needing to know BIM software.

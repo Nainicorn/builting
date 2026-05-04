@@ -5,8 +5,8 @@
  */
 
 import {
-  buildClaim, buildEvidence, typeToKind, inferDiscipline,
-  CLAIM_KINDS, EXTRACTION_METHODS, COORDINATE_SOURCES, SOURCE_ROLES
+  buildClaim, buildEvidence, buildProvenance, typeToKind, inferDiscipline,
+  CLAIM_KINDS, EXTRACTION_METHODS, COORDINATE_SOURCES, SOURCE_ROLES, PROVENANCE_STATUS
 } from './claimsSchema.mjs';
 
 /**
@@ -24,6 +24,11 @@ export function dxfCssToClaims(css, sourceFileName) {
     EXTRACTION_METHODS.DXF_PARSER,
     COORDINATE_SOURCES.DIRECT_2D
   );
+
+  function provFor(sf) {
+    const f = sf || null;
+    return buildProvenance(f, f ? PROVENANCE_STATUS.DIRECT : PROVENANCE_STATUS.MISSING, 'extract');
+  }
 
   // CSS v1.0 flat contract: levelsOrSegments[] + elements[]
   const levels = css.levelsOrSegments || [];
@@ -43,6 +48,7 @@ export function dxfCssToClaims(css, sourceFileName) {
         confidence: 0.70,
         fieldConfidence: { dimensions: 0.70, placement: 0.70 },
         discipline: 'architectural',
+        provenance: provFor(sourceFileName),
       }
     ));
   }
@@ -109,6 +115,7 @@ export function dxfCssToClaims(css, sourceFileName) {
         fieldConfidence,
         discipline: inferDiscipline(el.type, el.properties),
         aliases,
+        provenance: provFor(el.sourceFile || sourceFileName),
       }
     ));
   }

@@ -183,8 +183,16 @@ function buildSegmentIndex(css) {
         dir = refLen > 0.001 ? vecScale(refDir, 1 / refLen) : null;
       }
       if (!dir) { skippedNoPath++; continue; }
-      startPt = { x: origin.x, y: origin.y, z: origin.z };
-      endPt = vecAdd(startPt, vecScale(dir, depth));
+      // placement.origin is the segment MIDPOINT (IFC convention), not the start.
+      // Use geom.path endpoints when available for the true extent; otherwise
+      // offset by half-depth in each direction from the midpoint origin.
+      if (geom.path && geom.path.length >= 2) {
+        startPt = geom.path[0];
+        endPt = geom.path[geom.path.length - 1];
+      } else {
+        startPt = vecSub(origin, vecScale(dir, depth / 2));
+        endPt   = vecAdd(origin, vecScale(dir, depth / 2));
+      }
     } else if (geom.path && geom.path.length >= 2) {
       startPt = geom.path[0];
       endPt = geom.path[geom.path.length - 1];
@@ -301,11 +309,27 @@ let _matchByContainer = 0;
 let _matchByProjection = 0;
 let _matchNone = 0;
 
+function findNearestSegment(elem, segIndex) {
+  const o = elem.placement?.origin;
+  if (!o) return null;
+  let best = null, bestDist = Infinity;
+  for (const rec of segIndex.values()) {
+    const proj = projectPointToSegment(o, rec.startPt, rec.endPt);
+    if (!proj) continue;
+    if (proj.distance < bestDist) { bestDist = proj.distance; best = rec; }
+  }
+  if (!best) return null;
+  const maxProjDist = Math.max(1.5, Math.hypot(best.halfW, best.halfH) * 1.5);
+  return bestDist < maxProjDist ? best : null;
+}
+
 function findParentSegment(elem, segIndex) {
-  // 1. Try explicit container/hostBranch
+  // 1. Try explicit container/hostBranch (check both properties and metadata —
+  //    tunnel-shell writes to metadata, so both locations must be read)
   const hostBranch = elem.properties?.hostStructuralBranchMatched ||
                      elem.properties?.derivedFromBranch ||
-                     elem.properties?.hostBranch;
+                     elem.properties?.hostBranch ||
+                     elem.metadata?.hostStructuralBranchMatched;
   if (hostBranch) {
     for (const rec of segIndex.values()) {
       if (rec.branchId === hostBranch || rec.key === hostBranch) {
@@ -313,6 +337,11 @@ function findParentSegment(elem, segIndex) {
         return rec;
       }
     }
+    // Key resolved but stale (segment was split/merged after host assignment).
+    // Use nearest-centerline projection rather than falling through to container,
+    // which may point to a geometrically wrong segment.
+    const nearest = findNearestSegment(elem, segIndex);
+    if (nearest) { _matchByProjection++; return nearest; }
   }
 
   // 2. Try container
@@ -363,7 +392,7 @@ function findParentSegment(elem, segIndex) {
 function getEquipmentOrientation(frame, zoneName, semanticType) {
   // Continuous runs (pipes, ducts, trays) align with tunnel axis
   if (['IfcPipeSegment', 'IfcDuctSegment', 'IfcCableCarrierSegment'].includes(semanticType)) {
-    return { axis: frame.tangent, refDirection: frame.lateral };
+    return { axis: frame.up, refDirection: frame.tangent };
   }
 
   // Inline mechanical equipment (fans): extrusion axis along flow direction
@@ -449,7 +478,83 @@ function applyEquipmentMounting(css) {
     return;
   }
 
+  // Build SPACE index for room-bound equipment placement.
+  // SPACE origins are often the room entry anchor on the bore wall, not the room centroid.
+  // Push ROOM_INTERIOR_OFFSET_M inward along the bore→room direction so equipment lands
+  // visibly inside the room volume, not on the wall face.
+  const ROOM_INTERIOR_OFFSET_M = 1.5;
+  const spaceIndex = new Map();
+  for (const e of css.elements) {
+    if ((e.type || '').toUpperCase() !== 'SPACE') continue;
+    const k = e.element_key || e.id;
+    if (!k) continue;
+    const eo = e.placement?.origin;
+    if (!eo) continue;
+    const anchorX = eo.x ?? 0, anchorY = eo.y ?? 0, floorZ = eo.z ?? 0;
+
+    // Skip SPACEs at default/zero origin — they have no valid placement.
+    if (Math.abs(anchorX) < 0.1 && Math.abs(anchorY) < 0.1) continue;
+
+    // Project anchor onto nearest tunnel segment centerline (XY only).
+    // The vector from that projection → anchor = "outward from bore" = "into room".
+    // Offset ROOM_INTERIOR_OFFSET_M further along that direction from the anchor.
+    let cx = anchorX, cy = anchorY;
+    let nearestDx = 0, nearestDy = 0, nearestDist = Infinity;
+    for (const rec of segIndex.values()) {
+      const sX = rec.startPt.x, sY = rec.startPt.y;
+      const eX = rec.endPt.x, eY = rec.endPt.y;
+      const dX = eX - sX, dY = eY - sY;
+      const len2 = dX * dX + dY * dY;
+      if (len2 < 1e-6) continue;
+      const t = Math.max(0, Math.min(1, ((anchorX - sX) * dX + (anchorY - sY) * dY) / len2));
+      const projX = sX + t * dX, projY = sY + t * dY;
+      const dist = Math.hypot(anchorX - projX, anchorY - projY);
+      if (dist < nearestDist) {
+        nearestDist = dist;
+        nearestDx = anchorX - projX;
+        nearestDy = anchorY - projY;
+      }
+    }
+    // Only offset when anchor is meaningfully off the centerline (on a side wall).
+    const nearestLen = Math.hypot(nearestDx, nearestDy);
+    if (nearestLen > 0.5) {
+      cx = anchorX + (nearestDx / nearestLen) * ROOM_INTERIOR_OFFSET_M;
+      cy = anchorY + (nearestDy / nearestLen) * ROOM_INTERIOR_OFFSET_M;
+    }
+
+    // Name tokens for keyword matching (words from name + key, lowercased).
+    const nameTokens = ((e.name || '') + ' ' + k).toLowerCase().split(/[\s\-_/]+/).filter(Boolean);
+
+    spaceIndex.set(k, { key: k, cx, cy, floorZ, anchorX, anchorY, nameTokens });
+  }
+
+  // Helper: find best-matching SPACE for an equipment element by name keyword overlap,
+  // tiebroken by proximity. Used when container/hostRoom don't point to a SPACE key.
+  // Portal buildings are excluded — fans don't live in portals.
+  const PORTAL_KEY_RE = /portal/i;
+  function findRoomForEquipment(elemName, origin) {
+    const nameLow = (elemName || '').toLowerCase();
+    const nameWords = nameLow.split(/[\s\-_/]+/).filter(Boolean);
+    if (nameWords.length === 0) return null;
+
+    let bestEntry = null, bestScore = -1, bestDist = Infinity;
+    for (const entry of spaceIndex.values()) {
+      if (PORTAL_KEY_RE.test(entry.key)) continue; // portals are structural, not equipment rooms
+      const score = entry.nameTokens.filter(t => nameWords.some(w => w === t || w.includes(t) || t.includes(w))).length;
+      const dist = (origin && Number.isFinite(origin.x))
+        ? Math.hypot(origin.x - entry.anchorX, origin.y - entry.anchorY)
+        : Infinity;
+      if (score > bestScore || (score === bestScore && dist < bestDist)) {
+        bestScore = score;
+        bestDist = dist;
+        bestEntry = entry;
+      }
+    }
+    return bestScore > 0 ? bestEntry : null;
+  }
+
   let mountingCorrections = 0;
+  let roomPlacementCount = 0;
   let originGuardCorrections = 0;
   let envelopeClips = 0;
   const generatedElements = [];
@@ -464,6 +569,22 @@ function applyEquipmentMounting(css) {
     if (!elem.metadata) elem.metadata = {};
     elem.metadata.originalPlacement = { x: o.x, y: o.y, z: o.z };
 
+    // Room-bound check: place inside the host SPACE at the interior centroid + 0.5m above floor.
+    // 1. Direct key match (container or hostRoom points to a SPACE key).
+    // 2. Name-keyword fallback: match equipment name tokens against SPACE name tokens,
+    //    tiebroken by proximity. Handles fans whose container is a tunnel segment branch
+    //    but whose name clearly identifies a specific room (e.g. "AC Fan" → AC Room).
+    let roomEntry = spaceIndex.get(elem.container) || spaceIndex.get(elem.properties?.hostRoom);
+    if (!roomEntry) roomEntry = findRoomForEquipment(elem.name, o);
+    if (roomEntry) {
+      o.x = roomEntry.cx; o.y = roomEntry.cy; o.z = roomEntry.floorZ + 0.5;
+      elem.container = roomEntry.key;
+      elem.metadata.correctedBy = 'ROOM_PLACEMENT';
+      elem.metadata.placedInRoom = roomEntry.key;
+      roomPlacementCount++;
+      continue;
+    }
+
     // Origin guard — skip equipment at near-zero origin with no host lineage.
     // These would otherwise project onto the nearest segment by distance, creating
     // misleading placements. Better to leave them unmounted and annotated.
@@ -474,8 +595,13 @@ function applyEquipmentMounting(css) {
       continue;
     }
 
-    // Find parent segment
-    const seg = findParentSegment(elem, segIndex);
+    // Find parent segment — for IfcFan, fall back to unconstrained nearest-segment
+    // search when the normal distance-gated lookup fails (spec-derived fans can sit
+    // 10–20m outside the tunnel bbox but still belong there).
+    let seg = findParentSegment(elem, segIndex);
+    if (!seg && st === 'IfcFan') {
+      seg = findNearestSegment(elem, segIndex);
+    }
     if (!seg) continue;
 
     // Canonicalize container ref to resolved segment key — prevents stale
@@ -786,7 +912,23 @@ function applyEquipmentMounting(css) {
       const fn2 = props.exit_node ? nodeXY.get(props.exit_node) : null;
       const hostSeg = nodeToSegment.get(props.entry_node) || nodeToSegment.get(props.exit_node);
       const fanProfile = elem.geometry?.profile || { height: 1.2, width: 1.2 };
-      const fanZ = hostSeg ? getSemanticZ(hostSeg, 'IfcFan', fanProfile) : (o.z + 2.0);
+
+      // Cap depth to fan disk thickness — the duct's depth is the BRANCH LENGTH (metres),
+      // not the fan disk thickness.  Emitting a 2.5m-deep cylinder along Z pushes the fan
+      // body well above the tunnel ceiling.  Use diameter × 0.2 matching the extract formula.
+      const fanRadius = fanProfile.radius || (Math.min(fanProfile.width || 1.2, fanProfile.height || 1.2) / 2);
+      const diskThickness = Math.max(0.15, fanRadius * 0.4);
+      elem.geometry.depth = diskThickness;
+
+      // Anchor Z: position the TOP of the disk at innerCeilZ − 0.1m clearance.
+      // Do NOT use getSemanticZ here because it was sized for the original elemH.
+      let fanZ;
+      if (hostSeg) {
+        const hf = getHostInteriorFrame(hostSeg);
+        fanZ = hf.innerCeilZ - 0.1 - diskThickness;
+      } else {
+        fanZ = o.z + 2.0;
+      }
 
       if (fn1 && fn2) {
         // Place at midpoint of entry/exit nodes
@@ -821,40 +963,59 @@ function applyEquipmentMounting(css) {
     const n1 = entryNode ? nodeXY.get(entryNode) : null;
     const n2 = exitNode ? nodeXY.get(exitNode) : null;
 
-    // Find host tunnel segment for Z clamping — use semantic Z based on element type
+    // Find host tunnel segment for Z clamping — use semantic Z based on element type.
+    // nodeToSegment stores raw CSS elements (used by getSemanticZ/getHostInteriorFrame).
+    // Y-range validation needs a segRecord (has startPt/endPt/halfW) — look it up in segIndex.
     const hostSeg = nodeToSegment.get(entryNode) || nodeToSegment.get(exitNode);
+    const hostSegKey = hostSeg ? (hostSeg.element_key || hostSeg.id) : null;
+    const hostSegRecord = hostSegKey ? segIndex.get(hostSegKey) : null;
     const elemProfile = elem.geometry?.profile || {};
     const ductZ = hostSeg ? getSemanticZ(hostSeg, st, elemProfile) : (o.z + 2.0);
 
     if (n1 && n2) {
-      elem.geometry.method = 'SWEEP';
-      elem.geometry.pathPoints = [
-        { x: n1.x, y: n1.y, z: ductZ },
-        { x: n2.x, y: n2.y, z: ductZ }
-      ];
-      delete elem.geometry.direction;
-      delete elem.geometry.depth; // depth is not used for SWEEP — pathPoints define length
-
-      o.x = n1.x; o.y = n1.y; o.z = ductZ;
-      // Conditional Z flattening: only flatten when dz is small relative to horizontal run
-      // (preserves legitimate sloped shafts/ramps)
-      const dx = n2.x - n1.x, dy = n2.y - n1.y;
-      const pathDir = { x: dx, y: dy, z: 0 };
-      const pathLen = vecLen(pathDir);
-      if (pathLen > 0.001) {
-        elem.placement.axis = vecScale(pathDir, 1 / pathLen);
+      // Validate NODE_MAP coords against host segment Y range — node IDs from different
+      // coordinate frames (DXF vs VentSim) can land 10+ m off the tunnel centerline.
+      let nodeMapOk = true;
+      if (hostSegRecord) {
+        const NODE_MAP_Y_MARGIN = 5.0; // metres
+        const segMinY = Math.min(hostSegRecord.startPt.y, hostSegRecord.endPt.y) - hostSegRecord.halfW - NODE_MAP_Y_MARGIN;
+        const segMaxY = Math.max(hostSegRecord.startPt.y, hostSegRecord.endPt.y) + hostSegRecord.halfW + NODE_MAP_Y_MARGIN;
+        if (n1.y < segMinY || n1.y > segMaxY || n2.y < segMinY || n2.y > segMaxY) {
+          console.log(`applyEquipmentMounting: NODE_MAP Y [${n1.y.toFixed(1)},${n2.y.toFixed(1)}] outside host Y [${segMinY.toFixed(1)},${segMaxY.toFixed(1)}] for ${elem.element_key || elem.id || '(unknown)'} — falling to SEGMENT_PROJECTION`);
+          nodeMapOk = false;
+        }
       }
-      elem.placement.refDirection = { x: 0, y: 0, z: 1 };
-      if (hostSeg) {
-        elem.container = hostSeg.element_key || hostSeg.id;
-        elem.metadata.parentSegment = hostSeg.element_key || hostSeg.id;
+      if (nodeMapOk) {
+        elem.geometry.method = 'SWEEP';
+        // pathPoints in WORLD coordinates — generate's PATH_SWEEP normalization subtracts
+        // the VentSim centroid from both pathPoints and placement.origin, then overwrites
+        // placement.origin with (centred) pathPoints[0]. Using local (0,0,0) offsets here
+        // causes the centroid subtraction to shift pathPoints[0] to −44 km, which then
+        // poisons the placement and scatters these ducts to world-origin.
+        o.x = n1.x; o.y = n1.y; o.z = ductZ;
+        elem.geometry.pathPoints = [
+          { x: n1.x, y: n1.y, z: ductZ },
+          { x: n2.x, y: n2.y, z: ductZ }
+        ];
+        delete elem.geometry.direction;
+        delete elem.geometry.depth; // depth is not used for SWEEP — pathPoints define length
+        // Identity placement frame: local X/Y/Z = world X/Y/Z, so the pathPoints delta
+        // {n2.x-n1.x, n2.y-n1.y, 0} stored in local coords maps to exactly that world offset
+        // from the placement origin. A non-identity axis rotates the local frame, causing IFC
+        // to transform the delta to a completely wrong world position (scattered ducts).
+        elem.placement.axis = { x: 0, y: 0, z: 1 };
+        elem.placement.refDirection = { x: 1, y: 0, z: 0 };
+        if (hostSeg) {
+          elem.container = hostSeg.element_key || hostSeg.id;
+          elem.metadata.parentSegment = hostSeg.element_key || hostSeg.id;
+        }
+        elem.metadata.pathSource = 'NODE_MAP';
+        elem.metadata.zAligned = true;
+        elem.metadata.pathGenerated = true;
+        mepNodePaths++;
+        mepCenterlineSnaps++;
+        continue;
       }
-      elem.metadata.pathSource = 'NODE_MAP';
-      elem.metadata.zAligned = true;
-      elem.metadata.pathGenerated = true;
-      mepNodePaths++;
-      mepCenterlineSnaps++;
-      continue;
     }
 
     // Fallback: segment projection (semantic Z clamping)
@@ -868,16 +1029,17 @@ function applyEquipmentMounting(css) {
     const p1 = vecAdd(seg.startPt, vecScale(seg.frame.tangent, seg.length * 0.90));
 
     elem.geometry.method = 'SWEEP';
+    // pathPoints in WORLD coordinates — same reason as NODE_MAP path above.
+    o.x = p0.x; o.y = p0.y; o.z = segZ;
     elem.geometry.pathPoints = [
       { x: p0.x, y: p0.y, z: segZ },
       { x: p1.x, y: p1.y, z: segZ }
     ];
     delete elem.geometry.direction;
     delete elem.geometry.depth;
-
-    o.x = p0.x; o.y = p0.y; o.z = segZ;
-    elem.placement.axis = { ...seg.frame.tangent };
-    elem.placement.refDirection = { x: 0, y: 0, z: 1 };
+    // Identity frame — same reason as NODE_MAP path: local delta must equal world delta.
+    elem.placement.axis = { x: 0, y: 0, z: 1 };
+    elem.placement.refDirection = { x: 1, y: 0, z: 0 };
     elem.container = seg.key;
     elem.metadata.pathSource = 'SEGMENT_PROJECTION';
     elem.metadata.zAligned = true;
@@ -888,6 +1050,55 @@ function applyEquipmentMounting(css) {
   }
   if (mepCenterlineSnaps > 0 || mepNodePaths > 0 || mepFanConverted > 0) {
     console.log(`MEP path generation: ${mepNodePaths} node-based, ${mepCenterlineSnaps - mepNodePaths} segment-projected, ${mepFanConverted} fan conversions`);
+  }
+
+  // ---- Clip PATH_SWEEP pathPoints to host segment longitudinal bounds ----
+  // NODE_MAP paths span the full entry→exit node distance, which may cross multiple
+  // sub-segments after buildPathConnections splits original branches. Clamp each
+  // pathPoint to [0, length] along the host tangent so swept geometry stays within
+  // its assigned segment bbox.
+  let pathPointClips = 0;
+  for (const elem of css.elements) {
+    if (!elem.geometry?.pathPoints || elem.geometry.pathPoints.length < 2) continue;
+    if (!elem.metadata?.parentSegment) continue;
+    const clipSeg = segIndex.get(elem.metadata.parentSegment);
+    if (!clipSeg || clipSeg.length <= 0) continue;
+
+    const { startPt: cStart, frame: cFrame, length: cLen } = clipSeg;
+    let anyClipped = false;
+    const newPoints = elem.geometry.pathPoints.map(pt => {
+      const along = vecDot(vecSub(pt, cStart), cFrame.tangent);
+      const t = along / cLen;
+      const tc = Math.max(0, Math.min(1, t));
+      if (Math.abs(tc - t) > 1e-3) {
+        anyClipped = true;
+        const clamped = vecAdd(cStart, vecScale(cFrame.tangent, tc * cLen));
+        return { x: clamped.x, y: clamped.y, z: pt.z };
+      }
+      return pt;
+    });
+    if (!anyClipped) continue;
+
+    // Guard: both ends clamped to same endpoint — expand to 10%–90% of segment
+    const p0 = newPoints[0], pN = newPoints[newPoints.length - 1];
+    if (Math.hypot(pN.x - p0.x, pN.y - p0.y) < 0.1) {
+      const z = p0.z;
+      const fb0 = vecAdd(cStart, vecScale(cFrame.tangent, cLen * 0.1));
+      const fbN = vecAdd(cStart, vecScale(cFrame.tangent, cLen * 0.9));
+      newPoints[0] = { x: fb0.x, y: fb0.y, z };
+      newPoints[newPoints.length - 1] = { x: fbN.x, y: fbN.y, z };
+    }
+
+    elem.geometry.pathPoints = newPoints;
+    if (elem.placement?.origin) {
+      elem.placement.origin.x = newPoints[0].x;
+      elem.placement.origin.y = newPoints[0].y;
+    }
+    elem.metadata.pathClipped = true;
+    pathPointClips++;
+  }
+  if (pathPointClips > 0) {
+    console.log(`Path clip: ${pathPointClips} PATH_SWEEP elements clipped to host segment bounds`);
   }
 
   // ---- Auto-generate continuous systems ----
@@ -1158,16 +1369,20 @@ function applyEquipmentMounting(css) {
       // Skip always-visible promoted types
       if (ALWAYS_VISIBLE.has(elem.semanticType)) continue;
 
-      // Hide auto-generated continuous systems
+      // SHOW auto-generated continuous systems — they ARE the correct interior MEP
+      // (crown ducts, pipes, cable trays, lights) with proper sizing and placement.
       if (elem.source === 'GENERATED' && elem.metadata.generatedBy === 'CONTINUOUS_SYSTEM') {
-        elem.metadata.geometryExportable = false;
-        elem.metadata.exportReason = 'detail_mode_structure_only';
-        generatedHidden++;
+        continue; // keep exportable — interior equipment should be visible
+      }
+      // SHOW source-provided MEP — VentSim airway ducts/pipes are primary data,
+      // not inferred detail. They need to reach generate for SweptDiskSolid treatment.
+      if (elem.source === 'VSM' && (elem.type === 'DUCT' || elem.type === 'PIPE')) {
         continue;
       }
-      // Hide inferred VentSim helper equipment (lights, cable trays, pipes, ducts)
-      // These are extracted by the pipeline but not user-provided core structure
-      if (DETAIL_ONLY_TYPES.has(elem.semanticType) && elem.type === 'EQUIPMENT') {
+      // Hide inferred helper equipment (lights, cable trays, pipes, ducts)
+      // that were auto-generated by the pipeline, not provided by source data.
+      const MEP_CSS_TYPES = new Set(['EQUIPMENT', 'DUCT', 'PIPE', 'CABLE_TRAY']);
+      if (DETAIL_ONLY_TYPES.has(elem.semanticType) && MEP_CSS_TYPES.has(elem.type)) {
         elem.metadata.geometryExportable = false;
         elem.metadata.exportReason = 'detail_mode_structure_only';
         generatedHidden++;
@@ -1222,6 +1437,7 @@ function applyEquipmentMounting(css) {
   if (!css.metadata) css.metadata = {};
   css.metadata.equipmentMounting = {
     mountingCorrections,
+    roomPlacementCount,
     originGuardCorrections,
     envelopeClips,
     envelopeViolations,
@@ -1230,7 +1446,7 @@ function applyEquipmentMounting(css) {
     generatedPads: generatedElements.filter(e => e.properties?.slabType === 'EQUIPMENT_PAD').length,
     segmentsIndexed: segIndex.size
   };
-  console.log(`applyEquipmentMounting [TUNNEL]: ${mountingCorrections} corrections, ${envelopeClips} envelope clips, ${generatedSystemCount} systems generated, ${generatedElements.length} total new elements`);
+  console.log(`applyEquipmentMounting [TUNNEL]: ${mountingCorrections} corrections, ${roomPlacementCount} room placements, ${envelopeClips} envelope clips, ${generatedSystemCount} systems generated, ${generatedElements.length} total new elements`);
   console.log(`  parentMatch: host=${_matchByHost} container=${_matchByContainer} projection=${_matchByProjection} none=${_matchNone}`);
 }
 

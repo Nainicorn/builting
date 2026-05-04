@@ -1,7 +1,12 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { createHash } from 'crypto';
+
+// Phase 13: Consumer contract check
+import { checkContractAsync, ifcContract } from '@builting/contracts';
+// Phase 13 PR2: Trace writer
+import { writeTraceStart, writeTraceEnd } from '@builting/trace';
 
 const dynamoClient = new DynamoDBClient({});
 const dynamo = DynamoDBDocumentClient.from(dynamoClient);
@@ -10,12 +15,39 @@ const RENDERS_TABLE = process.env.RENDERS_TABLE || 'builting-renders';
 const IFC_BUCKET = process.env.IFC_BUCKET || 'builting-ifc';
 const DATA_BUCKET = process.env.DATA_BUCKET || 'builting-data';
 
-export const handler = async (event) => {
+export const handler = async (event, context) => {
   console.log('StoreIFC input:', JSON.stringify(event, null, 2));
   const { userId, renderId, bucket, ifcS3Path, ai_generated_title, ai_generated_description, elementCounts, outputMode, cssHash, tracingReport, validationSummary, sourceFusion, structuralWarnings, refinementReport, refinementReportS3Key, readinessScore, exportReadiness, authoringSuitability, criticalIssueCount, validationWarningCount, validationProxyRatio, validationReportS3Key, generationModeRecommendation, readinessDelta, geometryFidelity, exportFormats, exportFiles } = event;
+  // Phase 13 PR2: Trace state
+  const _traceRunId = context?.awsRequestId || `store-${Date.now()}`;
+  const _traceStartedAt = new Date().toISOString();
+  let _traceKey = null; let _traceAttemptN = 1;
 
   try {
-    // Handle failure mode — called by Step Function Catch to mark render as failed
+    // Handle contract failure mode — distinct from generic failures.
+    // Step Function routes ContractFailure errors here via HandleContractFailure state.
+    if (event.contractFailure) {
+      const errorMsg = typeof event.error === 'object'
+        ? (event.error.Cause || event.error.Error || JSON.stringify(event.error))
+        : String(event.error || 'Contract check failed');
+      console.error(`[contract_failure_recorded] renderId=${renderId} error=${errorMsg.substring(0, 200)}`);
+      await dynamo.send(
+        new UpdateCommand({
+          TableName: RENDERS_TABLE,
+          Key: { user_id: userId, render_id: renderId },
+          UpdateExpression: 'SET #status = :status, error_message = :err',
+          ExpressionAttributeNames: { '#status': 'status' },
+          ExpressionAttributeValues: {
+            ':status': 'failed_contract',
+            ':err': errorMsg.substring(0, 1000),
+          },
+        })
+      );
+      console.log('DynamoDB updated with failed_contract status');
+      return { userId, renderId, status: 'failed_contract', error_message: errorMsg };
+    }
+
+    // Handle generic failure mode — called by Step Function Catch for non-contract errors.
     if (event.failureMode) {
       console.log('Recording render failure:', event.error);
       const errorMsg = typeof event.error === 'object'
@@ -34,6 +66,21 @@ export const handler = async (event) => {
       console.log('DynamoDB updated with failed status');
       return { userId, renderId, status: 'failed', error_message: errorMsg };
     }
+
+    // Consumer contract check: validate generate→store event on entry (halting).
+    await checkContractAsync('ifcContract', ifcContract, event, {
+      halting: true,
+      renderId,
+      stage: 'store-entry',
+    });
+
+    // Phase 13 PR2: Trace start — after failure-mode guards and contract check.
+    try {
+      ({ key: _traceKey, attemptN: _traceAttemptN } = await writeTraceStart({
+        renderId, stage: 'store', runId: _traceRunId, startedAt: _traceStartedAt,
+        artifactKey: ifcS3Path || null,
+      }));
+    } catch (te) { console.warn('[trace] start write failed (non-fatal):', te.message); }
 
     // IFC is already saved to S3 by the IFC generator Lambda.
     // This Lambda updates DynamoDB with the path and metadata.
@@ -114,6 +161,28 @@ export const handler = async (event) => {
 
     console.log('DynamoDB updated with IFC path and metadata');
 
+    // Phase 13 PR2: Persist trace summary to DynamoDB for fast UI reads.
+    // Lists all pipeline_trace/ files for this render, writes compact index.
+    try {
+      const tracePrefix = `${renderId}/pipeline_trace/`;
+      const traceList = await s3.send(new ListObjectsV2Command({ Bucket: IFC_BUCKET, Prefix: tracePrefix }));
+      const traceFiles = (traceList.Contents || []).map(obj => ({
+        key: obj.Key,
+        stage: obj.Key.replace(tracePrefix, '').split('.')[0],
+        size: obj.Size,
+        lastModified: obj.LastModified?.toISOString?.() || null,
+      }));
+      if (traceFiles.length > 0) {
+        await dynamo.send(new UpdateCommand({
+          TableName: RENDERS_TABLE,
+          Key: { user_id: userId, render_id: renderId },
+          UpdateExpression: 'SET pipelineTraceSummary = :pts',
+          ExpressionAttributeValues: { ':pts': { stageCount: traceFiles.length, files: traceFiles } },
+        }));
+        console.log(`[trace] pipelineTraceSummary saved: ${traceFiles.length} trace file(s)`);
+      }
+    } catch (te) { console.warn('[trace] pipelineTraceSummary DynamoDB write failed (non-fatal):', te.message); }
+
     // Phase 6: Write artifact_manifest.json with v2 pipeline artifacts and lineage
     const dataBucket = bucket || DATA_BUCKET;
     const revision = event.renderRevision || 1;
@@ -162,6 +231,24 @@ export const handler = async (event) => {
       ContentType: 'application/json'
     }));
     console.log(`Artifact manifest saved: s3://${dataBucket}/${manifestKey}`);
+
+    // Phase 13 PR2: Trace end (Release 13.2: + scalars)
+    if (_traceKey) {
+      try {
+        await writeTraceEnd({
+          traceKey: _traceKey, stage: 'store', runId: _traceRunId, attemptN: _traceAttemptN,
+          startedAt: _traceStartedAt, finishedAt: new Date().toISOString(),
+          outputArtifactKey: ifc_s3_path,
+          counts: elementCounts || {},
+          validationFlags: [],
+          scalars: {
+            gatePassRate: null,
+            contractStatus: 'pass',
+            provenanceCompleteness: null,
+          },
+        });
+      } catch (te) { console.warn('[trace] end write failed (non-fatal):', te.message); }
+    }
 
     return {
       ...event,

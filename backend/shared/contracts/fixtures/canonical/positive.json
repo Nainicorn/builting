@@ -1,0 +1,59 @@
+{
+  "_category": "positive",
+  "_description": "Minimal valid canonical_observed.json: one observation merged from one wall claim.",
+  "schemaVersion": "2.0",
+  "layer": "canonical_observed",
+  "domain": "TUNNEL",
+  "facility": {
+    "name": "Test Tunnel",
+    "type": "tunnel",
+    "description": null,
+    "units": "M",
+    "origin": { "x": 0, "y": 0, "z": 0 },
+    "axes": "RIGHT_HANDED_Z_UP"
+  },
+  "observations": [
+    {
+      "observation_id": "obs-0001",
+      "canonical_id": "canon-abc12345-def",
+      "instance_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+      "source_claim_ids": ["c-0001"],
+      "observation_type": "linear_feature",
+      "observation_status": "accepted",
+      "candidate_class": "wall",
+      "candidate_class_source": "parser_heuristic",
+      "geometry_evidence": {
+        "curves": [],
+        "points": [{ "x": 0, "y": 0, "z": 0 }],
+        "profiles": [],
+        "rawCoordinates": [],
+        "dimensions": { "depth": 5.0 }
+      },
+      "semantic_evidence": {
+        "labels": ["wall-1"],
+        "tags": ["WALL"],
+        "properties": {},
+        "materials": []
+      },
+      "context_evidence": {
+        "containerHints": [],
+        "adjacencyHints": [],
+        "hostHints": [],
+        "systemHints": []
+      },
+      "confidence": 0.85,
+      "provenance": {
+        "sourceFile": "tunnel-plan.dxf",
+        "sourceFileStatus": "direct",
+        "sourceFiles": ["tunnel-plan.dxf"],
+        "stage": "resolve:merge",
+        "modifications": []
+      }
+    }
+  ],
+  "metadata": {
+    "claimsConsumed": 1,
+    "observationsProduced": 1,
+    "rejectedClaims": 0
+  }
+}

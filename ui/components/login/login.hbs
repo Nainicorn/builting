@@ -1,55 +1,46 @@
 {{#if main}}
-  <div class="__login-container">
+<div class="__login-container">
     <div class="__login-main">
-      <div class="__login-branding">
-        <span class="__brand-name">STRUCT</span>
-      </div>
-      <div class="__login-body">
-        <div class="__login-title">Sign In</div>
-        <form id="login-form" class="__login-form">
-          <input
-            type="email"
-            id="email"
-            class="__login-input"
-            placeholder="Email address"
-            required
-            aria-label="Email address"
-          />
-          <input
-            type="password"
-            id="password"
-            class="__login-input"
-            placeholder="Password"
-            required
-            aria-label="Password"
-          />
-          <button
-            type="submit"
-            id="submit"
-            class="__login-button"
-            aria-label="Submit"
-          >
-            Sign In
+        <div class="__login-branding">
             <svg
-              class="__login-icon"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
+                class="__login-logo"
+                viewBox="0 0 200 220"
+                fill="none"
+                xmlns="http://www.w3.org/2000/svg"
             >
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="2"
-                d="M13 7l5 5m0 0l-5 5m5-5H6"
-              ></path>
+                <polyline points="40,205 40,22 112,75 112,205" stroke="currentColor" stroke-width="7" stroke-linejoin="round" stroke-linecap="round"/>
+                <polyline points="92,205 92,95 155,95 155,205" stroke="currentColor" stroke-width="7" stroke-linejoin="round" stroke-linecap="round"/>
+                <line x1="92" y1="128" x2="155" y2="205" stroke="currentColor" stroke-width="7" stroke-linecap="round"/>
+                <line x1="15" y1="212" x2="182" y2="212" stroke="currentColor" stroke-width="7" stroke-linecap="round"/>
             </svg>
-          </button>
-        </form>
-        <div class="__error-message" id="error-message"></div>
-      </div>
-    </div>
+            <span class="__brand-name">BUILTING</span>
+        </div>
 
-    <div class="__login-footer">
+        <form id="login-form" class="__login-form">
+            <input
+                type="email"
+                id="email"
+                class="__login-input"
+                placeholder="Email address"
+                required
+                autocomplete="email"
+                aria-label="Email address"
+            />
+            <input
+                type="password"
+                id="password"
+                class="__login-input"
+                placeholder="Password"
+                required
+                autocomplete="current-password"
+                aria-label="Password"
+            />
+            <button type="submit" id="submit" class="__login-button" aria-label="Sign in">
+                Sign In
+            </button>
+        </form>
+
+        <div class="__error-message" id="error-message"></div>
     </div>
-  </div>
+</div>
 {{/if}}

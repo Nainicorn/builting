@@ -1,0 +1,88 @@
+BEGGARS TOMB — HVAC SYSTEM TOPOLOGY
+=====================================
+Source: Revit model BT_07.ifc, verified 2026-04-20.
+All 5 mechanical systems are EXHAUST AIR type. There are no supply systems.
+
+SYSTEM OVERVIEW
+----------------
+Total systems:       5 (all Mechanical Exhaust_Air)
+Total duct segments: 27 (all Round, 500mm diameter)
+Total duct fittings: 27 (25 elbows + 3 rect-to-round + 1 round transition)
+Total ports:         122 distribution ports (SOURCE / SINK / SOURCEANDSINK)
+Total path links:    81 (IfcRelConnectsPathElements — duct-to-duct at endpoints)
+
+SYSTEM BREAKDOWN
+-----------------
+Mechanical Exhaust_Air 1:  15 duct/port members  — smallest branch, likely AC room exhaust
+Mechanical Exhaust_Air 2:  52 duct/port members  — largest branch, main tunnel exhaust run
+Mechanical Exhaust_Air 3:  67 duct/port members  — generator room exhaust (largest system)
+Mechanical Exhaust_Air 4:  30 duct/port members  — shaft exhaust
+Mechanical Exhaust_Air 5:   6 duct/port members  — smallest branch, portal exhaust stub
+
+All 5 systems serve the main building. Each system is an independent
+network — ducts from System 1 do NOT connect to ducts from System 2, etc.
+
+DUCT SEGMENT INVENTORY (27 total, all 500mm diameter)
+------------------------------------------------------
+Segment lengths in metres (each is one IfcFlowSegment):
+  28.543  — main run, System 2 or 3
+  25.122  — main run, System 2 or 3
+  24.654  — main run, System 2 or 3
+  24.380  — main run, System 3
+  18.990  — intermediate run
+  17.720  — intermediate run
+  16.670  — intermediate run
+   7.880  — branch segment
+   7.300  — branch segment
+   7.297  — branch segment
+   6.100  — branch segment
+   5.190  — short branch
+   4.940  — short branch
+   3.900  — short branch
+   3.800  — short branch
+   3.572  — short branch
+   1.580  — stub
+   0.996  — stub
+   0.858  — stub
+   0.825  — stub
+   0.600  — stub
+   0.575  — stub
+   0.453  — stub
+   0.404  — stub connector
+  (3 additional segments connect fan outlets to main runs at 9500/19000 CFM fan diameters)
+
+DUCT FITTING INVENTORY (27 total)
+-----------------------------------
+M_Round Elbow 1D:                     25 instances — all 500mm diameter, 90-degree bends
+M_Rect-to-Round Transition 15deg:      3 instances — connects fan rectangular outlet to round duct
+M_Round Transition 15deg:             1 instance  — diameter reduction between runs
+
+EQUIPMENT → DUCT CONNECTIONS
+------------------------------
+9500 CFM Centrifugal Fan:
+  - Outlet duct diameter: 152.4mm (6 inch)
+  - Connects via M_Rect-to-Round Transition to 500mm main duct
+  - Fan is part of Mechanical Exhaust_Air 1 or System 5
+
+19000 CFM Centrifugal Fan:
+  - Outlet duct diameter: 203.2mm (8 inch)
+  - Connects via M_Rect-to-Round Transition to 500mm main duct
+  - Fan is part of Mechanical Exhaust_Air 2 or System 3
+
+AHU Fan Module (Rear Discharge Up, 50 sq ft coil):
+  - Part of the larger exhaust system
+  - Connects to primary duct network via transition fitting
+
+FLOW DIRECTION
+---------------
+All systems are EXHAUST — flow moves FROM rooms TOWARD fan outlets.
+Source ports (outflow from ducts): at fan discharge points
+Sink ports (inflow to ducts): at room diffuser/grille pickup points
+SOURCEANDSINK ports: at duct-to-duct junction fittings
+
+SPATIAL DISTRIBUTION
+---------------------
+Level 0 (1290m MSL): Systems 1, 3, 4 primary runs
+Level 1 (1294m MSL): Systems 2, 5 primary runs
+Ducts run along ceiling line — centerline at approximately 3.8m above floor
+(storey height 4.0m, duct diameter 0.5m, centerline at 4.0 - 0.25 = 3.75m from floor)

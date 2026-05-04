@@ -31,7 +31,7 @@ const setupWasm = {
       fs.mkdirSync('./public', { recursive: true });
     }
 
-    const wasmFiles = ['web-ifc.wasm', 'web-ifc-mt.wasm', 'web-ifc-mt.worker.js', 'web-ifc-api.js'];
+    const wasmFiles = ['web-ifc.wasm', 'web-ifc-mt.wasm', 'web-ifc-mt.worker.js'];
     for (const wasmFile of wasmFiles) {
       const wasmSrc = path.resolve(`./node_modules/web-ifc/${wasmFile}`);
       const wasmDest = path.resolve(`./public/${wasmFile}`);
@@ -49,17 +49,6 @@ const setupWasm = {
 
       if (shouldCopy && fs.existsSync(wasmSrc)) {
         fs.copyFileSync(wasmSrc, wasmDest);
-
-        // Patch web-ifc-mt.worker.js: when urlOrBlob is undefined (ES module context),
-        // fall back to deriving the web-ifc-api.js URL from the worker's own location.
-        if (wasmFile === 'web-ifc-mt.worker.js') {
-          let workerSrc = fs.readFileSync(wasmDest, 'utf-8');
-          workerSrc = workerSrc.replace(
-            '}else{var objectUrl=URL.createObjectURL(e.data.urlOrBlob);importScripts(objectUrl);URL.revokeObjectURL(objectUrl)}',
-            '}else if(e.data.urlOrBlob!=null){var objectUrl=URL.createObjectURL(e.data.urlOrBlob);importScripts(objectUrl);URL.revokeObjectURL(objectUrl)}else{importScripts(self.location.href.replace(/web-ifc-mt\\.worker\\.js$/,"web-ifc-api.js"))}'
-          );
-          fs.writeFileSync(wasmDest, workerSrc, 'utf-8');
-        }
       }
     }
   }
@@ -72,13 +61,7 @@ export default defineConfig({
   server: {
     port: 5001,
     host: 'localhost',
-    headers(req) {
-      // Prevent browser from caching the patched web-ifc worker
-      if (req && (req.url || '').includes('web-ifc-mt.worker.js')) {
-        return { 'Cache-Control': 'no-store' };
-      }
-      return {};
-    },
+
     proxy: {
       '/api': {
         target: 'http://localhost:5002',

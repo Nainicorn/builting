@@ -2,6 +2,7 @@
  * Claims Schema — constants, claim ID generation, envelope builder, evidence builder, validation.
  * Foundation module for Phase 1 claims dual-write.
  */
+import { logDecision } from '@builting/audit';
 
 // Claim kind constants
 export const CLAIM_KINDS = {
@@ -20,6 +21,8 @@ export const CLAIM_KINDS = {
   VISION_FINDING: 'vision_finding',
   SYSTEM_MEMBERSHIP: 'system_membership',
   COLUMN_CANDIDATE: 'column_candidate',
+  COVERING_CANDIDATE: 'covering_candidate',
+  FITTING_CANDIDATE: 'fitting_candidate',
 };
 
 // Map CSS element types to claim kinds
@@ -35,6 +38,8 @@ export const TYPE_TO_KIND = {
   WINDOW: CLAIM_KINDS.OPENING_CANDIDATE,
   SPACE: CLAIM_KINDS.SPACE_DEFINITION,
   COLUMN: CLAIM_KINDS.COLUMN_CANDIDATE,
+  COVERING: CLAIM_KINDS.COVERING_CANDIDATE,
+  DUCT_FITTING: CLAIM_KINDS.FITTING_CANDIDATE,
 };
 
 // Valid claim statuses
@@ -44,6 +49,36 @@ export const CLAIM_STATUS = {
   REJECTED: 'rejected',
   UNRESOLVED: 'unresolved',
 };
+
+// Phase 13 provenance status values
+// Describes how a claim (or element) got its source attribution.
+export const PROVENANCE_STATUS = {
+  DIRECT: 'direct',                       // attributed to one specific upload file
+  INHERITED_CONSENSUS: 'inherited_consensus', // merged from ≥2 sources, all agreed
+  INHERITED_CONTESTED: 'inherited_contested', // merged from ≥2 sources, ≥1 alternative discarded
+  DERIVED_GEOMETRIC: 'derived_geometric', // deterministic transform of an existing element
+  DERIVED_INFERRED: 'derived_inferred',   // heuristic new element (inferred slab, derived opening)
+  MISSING: 'missing',                     // extract couldn't attribute to a source
+  LEGACY: 'legacy',                       // pre-Phase-13 element with no provenance record
+};
+
+/**
+ * Build a Phase 13 provenance object.
+ * @param {string|null} sourceFile - S3 key or filename of the upload that produced this claim
+ * @param {string} status - One of PROVENANCE_STATUS values
+ * @param {string} stage - Pipeline stage that assigned this provenance ('extract', 'resolve', 'topology:snap', ...)
+ * @param {string[]} modifications - Ordered list of pipeline passes that modified this element
+ */
+export function buildProvenance(sourceFile, status, stage, modifications = []) {
+  const sf = sourceFile || null;
+  return {
+    sourceFile: sf,
+    sourceFileStatus: status || PROVENANCE_STATUS.MISSING,
+    sourceFiles: sf ? [sf] : [],
+    stage: stage || 'extract',
+    modifications: Array.isArray(modifications) ? modifications : [],
+  };
+}
 
 // Valid extraction methods
 export const EXTRACTION_METHODS = {
@@ -94,6 +129,18 @@ export const SOURCE_ROLES = {
   VISION: 'VISION',
 };
 
+// Source authority levels — used by resolve to break field conflicts
+// before falling back to confidence/extraction-method ranking.
+// OVERRIDE wins over AUTHORITATIVE wins over DEFAULT.
+// A source declares itself OVERRIDE either via a filename pattern
+// (e.g. "*Supplemental_Specs*") or via a self-declared header
+// (e.g. "THIS DOCUMENT IS THE HIGHEST-AUTHORITY SOURCE").
+export const AUTHORITY_LEVELS = {
+  DEFAULT: 'DEFAULT',
+  AUTHORITATIVE: 'AUTHORITATIVE',
+  OVERRIDE: 'OVERRIDE',
+};
+
 let claimCounter = 0;
 
 /**
@@ -120,6 +167,7 @@ export function buildEvidence(source, sourceRole, extractionMethod, coordinateSo
     sourceRole: sourceRole || null,
     extractionMethod: extractionMethod || null,
     coordinateSource: coordinateSource || COORDINATE_SOURCES.NONE,
+    authority: extras.authority || 'DEFAULT',
     excerpt: extras.excerpt || null,
     page: extras.page || null,
     region: extras.region || null,
@@ -141,7 +189,7 @@ export function buildEvidence(source, sourceRole, extractionMethod, coordinateSo
  * @param {object} options - { evidence, confidence, fieldConfidence, status, discipline, aliases }
  */
 export function buildClaim(kind, subjectLocalId, attributes, options = {}) {
-  return {
+  const claim = {
     claim_id: generateClaimId(),
     kind,
     subject_local_id: subjectLocalId,
@@ -156,7 +204,15 @@ export function buildClaim(kind, subjectLocalId, attributes, options = {}) {
     source_revision_hint: options.source_revision_hint || null,
     discipline: options.discipline || 'unknown',
     parserVersion: '1.0',
+    provenance: options.provenance || buildProvenance(null, PROVENANCE_STATUS.MISSING, 'extract'),
   };
+  logDecision({
+    pass: 'extraction', element_id: claim.claim_id, action: 'claim_emitted',
+    reason: 'source_extracted',
+    params: { kind: claim.kind, sourceFile: claim.provenance?.sourceFile ?? null,
+              method: claim.evidence?.[0]?.method ?? null, confidence: claim.confidence },
+  });
+  return claim;
 }
 
 /**
@@ -247,10 +303,13 @@ export function inferDiscipline(type, properties = {}) {
     case 'DOOR':
     case 'WINDOW':
     case 'SPACE':
+    case 'COVERING':
       return 'architectural';
     case 'TUNNEL_SEGMENT':
     case 'DUCT':
       return properties.systemType ? 'mechanical' : 'civil';
+    case 'DUCT_FITTING':
+      return 'mechanical';
     case 'EQUIPMENT':
       if (properties.systemType === 'ELECTRICAL' || properties.systemType === 'CABLE_TRAY') return 'electrical';
       if (properties.systemType === 'PLUMBING') return 'plumbing';

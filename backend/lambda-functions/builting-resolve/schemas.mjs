@@ -5,6 +5,18 @@
 
 import { randomUUID } from 'crypto';
 
+// Phase 13 provenance status — mirrors extract/claims/claimsSchema.mjs:PROVENANCE_STATUS.
+// Duplicated here to avoid a cross-lambda import. Keep in sync.
+export const PROVENANCE_STATUS = {
+  DIRECT: 'direct',
+  INHERITED_CONSENSUS: 'inherited_consensus',
+  INHERITED_CONTESTED: 'inherited_contested',
+  DERIVED_GEOMETRIC: 'derived_geometric',
+  DERIVED_INFERRED: 'derived_inferred',
+  MISSING: 'missing',
+  LEGACY: 'legacy',
+};
+
 // Observation types for canonical_observed.json
 export const OBSERVATION_TYPES = {
   LINEAR_FEATURE: 'linear_feature',
@@ -92,6 +104,17 @@ export const EXTRACTION_METHOD_PRIORITY = [
   'LLM_EXTRACTION',
   'VSM_PARSER',
   'DXF_PARSER',
+];
+
+// Source authority priority — applied BEFORE confidence/method when resolving
+// conflicting claims. A claim whose evidence carries a higher authority level
+// wins the field, even if its confidence is lower. Authority is set by extract
+// based on filename pattern or self-declared header text in the source file.
+// Higher index = higher priority.
+export const AUTHORITY_PRIORITY = [
+  'DEFAULT',
+  'AUTHORITATIVE',
+  'OVERRIDE',
 ];
 
 // Coordinate source priority (higher index = higher priority)

@@ -1,0 +1,5 @@
+Equipment_ID,Type,Manufacturer,Model,Quantity,Notes
+HVAC-001,Air Handler Unit,Carrier,50HJQ012,1,Main HVAC unit
+PUMP-001,Chilled Water Pump,Grundfos,CR15-4,2,Chilled water loop
+FAN-001,Exhaust Fan,Greenheck,CUBE-100,3,Toilet exhaust
+CHILL-001,Chiller,Trane,CGAM-060,1,Central plant

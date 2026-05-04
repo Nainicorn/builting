@@ -2,11 +2,12 @@
  * resolve.mjs — ResolveClaims module.
  * Groups claims by subject identity, resolves field conflicts, builds observations.
  */
+import { logDecision } from '@builting/audit';
 
 import {
   KIND_TO_OBSERVATION_TYPE, KIND_TO_CANDIDATE_CLASS,
-  EXTRACTION_METHOD_PRIORITY, COORDINATE_SOURCE_PRIORITY,
-  OBSERVATION_STATUSES,
+  EXTRACTION_METHOD_PRIORITY, COORDINATE_SOURCE_PRIORITY, AUTHORITY_PRIORITY,
+  OBSERVATION_STATUSES, PROVENANCE_STATUS,
   extractionMethodToClassSource,
   generateObservationId, resetObservationCounter,
 } from './schemas.mjs';
@@ -85,8 +86,12 @@ function filterClaims(claims) {
   for (const c of claims) {
     if (c.status === 'rejected') {
       dropped.push({ claimId: c.claim_id, reason: 'rejected_by_extractor', supersededBy: null });
+      logDecision({ pass: 'filter', element_id: c.claim_id, action: 'claim_dropped',
+        reason: 'rejected_by_extractor', params: { confidence: c.confidence, kind: c.kind } });
     } else if (c.confidence < MIN_CONFIDENCE) {
       dropped.push({ claimId: c.claim_id, reason: 'below_confidence_threshold', supersededBy: null });
+      logDecision({ pass: 'filter', element_id: c.claim_id, action: 'claim_dropped',
+        reason: 'below_confidence_threshold', params: { confidence: c.confidence, threshold: MIN_CONFIDENCE, kind: c.kind } });
     } else {
       activeClaims.push(c);
     }
@@ -253,6 +258,10 @@ function resolveGroup(group) {
       isAmbiguous = true;
     }
 
+    logDecision({ pass: 'resolve', element_id: observation.observation_id || group.groupId,
+      action: 'claim_passthrough', reason: 'singleton_group',
+      params: { claimId: claim.claim_id, kind: claim.kind, confidence: claim.confidence, isAmbiguous } });
+
     return { observation, fieldResolutions, isAmbiguous };
   }
 
@@ -267,17 +276,24 @@ function resolveGroup(group) {
 
   const observation = buildObservation(winner, group);
 
-  // Aggregate provenance from all claims in group
-  const allSources = new Set();
-  const allBasis = new Set();
-  for (const c of group.claims) {
-    for (const ev of c.evidence) {
-      if (ev.source) allSources.add(ev.source);
-      if (ev.extractionMethod) allBasis.add(ev.extractionMethod);
-    }
-  }
-  observation.provenance.sourceFiles = [...allSources];
-  observation.provenance.basis = [...allBasis];
+  // Build Phase 13 provenance for merged group
+  const allSourceFiles = [...new Set(group.claims.flatMap(c =>
+    c.provenance?.sourceFiles?.length
+      ? c.provenance.sourceFiles
+      : c.evidence.map(e => e.source).filter(Boolean)
+  ))];
+  const allModifications = [...new Set(group.claims.flatMap(c => c.provenance?.modifications || []))];
+  // inherited_contested = field conflicts were resolved by discarding alternatives
+  const provenanceStatus = fieldResolutions.length > 0
+    ? PROVENANCE_STATUS.INHERITED_CONTESTED
+    : PROVENANCE_STATUS.INHERITED_CONSENSUS;
+  observation.provenance = {
+    sourceFile: allSourceFiles.length === 1 ? allSourceFiles[0] : null,
+    sourceFileStatus: provenanceStatus,
+    sourceFiles: allSourceFiles,
+    stage: 'resolve',
+    modifications: allModifications,
+  };
 
   // Weighted average confidence
   const totalConf = group.claims.reduce((s, c) => s + c.confidence, 0);
@@ -285,6 +301,12 @@ function resolveGroup(group) {
 
   // Collect all claim IDs
   observation.source_claim_ids = group.claims.map(c => c.claim_id);
+
+  logDecision({ pass: 'resolve', element_id: observation.observation_id || group.groupId,
+    action: 'claims_merged', reason: provenanceStatus,
+    params: { winner: winner.claim_id, claimCount: group.claims.length,
+              loserIds: group.claims.filter(c => c.claim_id !== winner.claim_id).map(c => c.claim_id),
+              fieldResolutionsCount: fieldResolutions.length, isAmbiguous, confidence: observation.confidence } });
 
   return { observation, fieldResolutions, isAmbiguous };
 }
@@ -294,8 +316,13 @@ function resolveGroup(group) {
  * Returns the "winning" claim with the best overall data.
  */
 function resolveFieldConflicts(claims, fieldResolutions, groupId) {
-  // Sort by confidence descending, then by extraction method priority
+  // Sort by source authority first, then confidence, then extraction method.
+  // Authority lets a self-declared override-source (e.g. *_Supplemental_Specs.txt)
+  // win against a generic narrative source even when confidences match.
   const sorted = [...claims].sort((a, b) => {
+    const ap = getAuthorityPriority(a);
+    const bp = getAuthorityPriority(b);
+    if (bp !== ap) return bp - ap;
     if (b.confidence !== a.confidence) return b.confidence - a.confidence;
     return getExtractionPriority(b) - getExtractionPriority(a);
   });
@@ -366,6 +393,20 @@ function getExtractionPriority(claim) {
   const method = claim.evidence?.[0]?.extractionMethod || 'HEURISTIC';
   const idx = EXTRACTION_METHOD_PRIORITY.indexOf(method);
   return idx >= 0 ? idx : 0;
+}
+
+/**
+ * Get the highest authority level across all evidence sources on a claim.
+ * Returns the index in AUTHORITY_PRIORITY (0=DEFAULT, higher=stronger).
+ */
+function getAuthorityPriority(claim) {
+  let maxIdx = 0;
+  for (const e of (claim.evidence || [])) {
+    const level = e?.authority || 'DEFAULT';
+    const idx = AUTHORITY_PRIORITY.indexOf(level);
+    if (idx > maxIdx) maxIdx = idx;
+  }
+  return maxIdx;
 }
 
 /**
@@ -465,6 +506,29 @@ function buildObservation(claim, group) {
     }
   }
 
+  // Phase 13 provenance — singleton: carry through from the claim unchanged.
+  // If the claim predates Phase 13 (no sourceFileStatus), synthesize from evidence.
+  let observationProvenance;
+  if (claim.provenance?.sourceFileStatus) {
+    observationProvenance = {
+      sourceFile: claim.provenance.sourceFile,
+      sourceFileStatus: claim.provenance.sourceFileStatus,
+      sourceFiles: claim.provenance.sourceFiles || [],
+      stage: claim.provenance.stage || 'extract',
+      modifications: claim.provenance.modifications || [],
+    };
+  } else {
+    const legacySources = claim.evidence.map(e => e.source).filter(Boolean);
+    const legacyPrimary = legacySources[0] || null;
+    observationProvenance = {
+      sourceFile: legacyPrimary,
+      sourceFileStatus: legacyPrimary ? PROVENANCE_STATUS.DIRECT : PROVENANCE_STATUS.MISSING,
+      sourceFiles: legacySources,
+      stage: 'extract',
+      modifications: [],
+    };
+  }
+
   return {
     observation_id: generateObservationId(),
     canonical_id: null, // Set by identity.mjs
@@ -478,11 +542,7 @@ function buildObservation(claim, group) {
     semantic_evidence: semanticEvidence,
     context_evidence: contextEvidence,
     confidence: claim.confidence,
-    provenance: {
-      basis: claim.evidence.map(e => e.extractionMethod).filter(Boolean),
-      coordinateSource: primaryEvidence.coordinateSource || 'NONE',
-      sourceFiles: claim.evidence.map(e => e.source).filter(Boolean),
-    },
+    provenance: observationProvenance,
     // Internal fields (removed by identity.mjs)
     _sourceAliases: [...new Set(sourceAliases)],
     _sourceSubjectIds: [...new Set(sourceSubjectIds)],

@@ -41,11 +41,25 @@ function writeUInt16LE(buf, val, offset) {
   buf[offset+1] = (val >>> 8) & 0xff;
 }
 
-const files = fs.readdirSync(dir).filter(f =>
-  !f.endsWith('.zip') && f !== '.DS_Store' && f !== 'build-zip.mjs' && f !== 'build-zip.js'
-  && !fs.statSync(path.join(dir, f)).isDirectory()
-);
+function collectFiles(baseDir, relDir = '') {
+  const results = [];
+  for (const entry of fs.readdirSync(path.join(baseDir, relDir) || baseDir)) {
+    const rel = relDir ? `${relDir}/${entry}` : entry;
+    const abs = path.join(baseDir, rel);
+    const stat = fs.statSync(abs);
+    if (stat.isDirectory()) {
+      if (entry !== 'node_modules' && entry !== 'dist' && entry !== '.DS_Store') {
+        results.push(...collectFiles(baseDir, rel));
+      }
+    } else if (!entry.endsWith('.zip') && entry !== '.DS_Store' &&
+               entry !== 'build-zip.mjs' && entry !== 'build-zip.js') {
+      results.push(rel);
+    }
+  }
+  return results;
+}
 
+const files = collectFiles(dir);
 console.log('Files to include:', files);
 
 const parts = [];       // raw bytes to write

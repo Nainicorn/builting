@@ -1,0 +1,41 @@
+{
+  "_category": "boundary",
+  "_failureReason": "observation.confidence is bounded to [0, 1]; -0.1 just below the bound. Catches Zod min vs Pydantic ge drift.",
+  "schemaVersion": "2.0",
+  "layer": "canonical_observed",
+  "domain": "TUNNEL",
+  "facility": null,
+  "observations": [
+    {
+      "observation_id": "obs-0001",
+      "canonical_id": "canon-abc12345-def",
+      "instance_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+      "source_claim_ids": ["c-0001"],
+      "observation_type": "linear_feature",
+      "observation_status": "accepted",
+      "candidate_class": "wall",
+      "candidate_class_source": "parser_heuristic",
+      "geometry_evidence": {
+        "curves": [], "points": [], "profiles": [], "rawCoordinates": [],
+        "dimensions": {}
+      },
+      "semantic_evidence": {
+        "labels": [], "tags": [], "properties": {}, "materials": []
+      },
+      "context_evidence": {
+        "containerHints": [], "adjacencyHints": [], "hostHints": [], "systemHints": []
+      },
+      "confidence": -0.1,
+      "provenance": {
+        "basis": ["DXF_PARSER"],
+        "coordinateSource": "DIRECT_2D",
+        "sourceFiles": ["x.dxf"]
+      }
+    }
+  ],
+  "metadata": {
+    "claimsConsumed": 1,
+    "observationsProduced": 1,
+    "rejectedClaims": 0
+  }
+}

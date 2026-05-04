@@ -1,0 +1,86 @@
+{
+  "_category": "positive",
+  "_description": "Minimal valid css_processed.json: one wall element produced by topology.",
+  "cssVersion": "1.0",
+  "domain": "BUILDING",
+  "facility": {
+    "name": "Test Building",
+    "type": "building",
+    "description": "single-element fixture",
+    "units": "M",
+    "origin": { "x": 0, "y": 0, "z": 0 },
+    "axes": "RIGHT_HANDED_Z_UP"
+  },
+  "levelsOrSegments": [
+    {
+      "id": "level-1",
+      "type": "STOREY",
+      "name": "Level 1",
+      "elevation_m": 0,
+      "height_m": 3.5
+    }
+  ],
+  "elements": [
+    {
+      "id": "wall-1",
+      "element_key": "wall-1",
+      "canonical_id": "canon-abc12345-def",
+      "type": "WALL",
+      "semanticType": "IfcWallStandardCase",
+      "name": "Wall 1",
+      "placement": {
+        "origin": { "x": 0, "y": 0, "z": 0 },
+        "axis": { "x": 0, "y": 0, "z": 1 },
+        "refDirection": { "x": 1, "y": 0, "z": 0 }
+      },
+      "geometry": {
+        "method": "EXTRUSION",
+        "profile": { "kind": "rectangle", "width": 0.2, "height": 3.0 },
+        "depth": 5.0
+      },
+      "container": "level-1",
+      "relationships": [],
+      "properties": {},
+      "material": {
+        "name": "concrete",
+        "color": [0.75, 0.75, 0.75],
+        "transparency": 0
+      },
+      "confidence": 0.85,
+      "source": "VSM",
+      "sourceFile": "tunnel-plan.dxf",
+      "metadata": {},
+      "provenance": {
+        "sourceFile": "tunnel-plan.dxf",
+        "sourceFileStatus": "direct",
+        "sourceFiles": ["tunnel-plan.dxf"],
+        "stage": "topology:init",
+        "modifications": []
+      }
+    }
+  ],
+  "topology": {
+    "nodes": [],
+    "runs": [],
+    "junctions": [],
+    "interfaces": [],
+    "hosts": [],
+    "openings": []
+  },
+  "metadata": {
+    "modelExtent": { "x": 5.0, "y": 0.2, "z": 3.0, "elementCount": 1 },
+    "safetyWarnings": [],
+    "exportProfile": "coordination",
+    "outputMode": "HYBRID",
+    "placementZIsAbsolute": true,
+    "sourceFusion": null,
+    "interiorSuppression": null,
+    "tunnelDecomposition": null,
+    "repairLog": [],
+    "cssValidationIssues": 0,
+    "facilityDimensions": [],
+    "materialAssignments": [],
+    "adapterSource": "resolvedToLegacyCss",
+    "resolvedSchemaVersion": "2.0"
+  }
+}
